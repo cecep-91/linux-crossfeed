@@ -959,7 +959,7 @@ public:
         gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(app->window));
         gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
         gtk_about_dialog_set_program_name(GTK_ABOUT_DIALOG(dialog), "PipeWire Crossfeed");
-        gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(dialog), "2.3.0");
+        gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(dialog), "2.3.1");
         gtk_about_dialog_set_comments(GTK_ABOUT_DIALOG(dialog),
             "Standalone ultra-low-latency headphone crossfeed audio processor.\n"
             "Reduces headphone listening fatigue and spatializes stereo imaging.\n\n"
@@ -1009,7 +1009,7 @@ public:
     static void on_tray_show_window(GtkWidget* /*item*/, gpointer user_data) {
         auto* app = static_cast<CrossfeedGuiApp*>(user_data);
         if (app->window) {
-            gtk_widget_show(app->window);
+            gtk_widget_show_all(app->window);
             gtk_window_present(GTK_WINDOW(app->window));
             app->refresh_from_engine();
         }
@@ -1631,6 +1631,9 @@ public:
         // Build Tray Icon and Menu
         build_tray();
 
+        // Ensure all constructed child widgets in window hierarchy are visible
+        gtk_widget_show_all(window);
+
         // Initial sync: if not running, auto-start engine for instant playback
         if (!query_engine_state(state)) {
             start_engine();
@@ -1650,7 +1653,7 @@ static void on_app_activate(GApplication* g_app, gpointer user_data) {
     if (!app->window) {
         app->build_ui(GTK_APPLICATION(g_app));
     }
-    gtk_widget_show(app->window);
+    gtk_widget_show_all(app->window);
     gtk_window_present(GTK_WINDOW(app->window));
     app->refresh_from_engine();
 }

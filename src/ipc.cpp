@@ -283,6 +283,12 @@ bool IpcClient::send_command(const std::string& socket_path, const std::string& 
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return false;
 
+    struct timeval tv{};
+    tv.tv_sec = 0;
+    tv.tv_usec = 300000; // 300ms timeout
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);

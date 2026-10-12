@@ -134,13 +134,13 @@ xbps-rindex -a dist/*.xbps
 sudo xbps-install -R dist crossfeed
 
 # Debian / Ubuntu / Linux Mint (.deb)
-sudo apt install ./dist/crossfeed_2.3.0-1_amd64.deb
+sudo apt install ./dist/crossfeed_2.3.1-1_amd64.deb
 
 # Fedora / RHEL / openSUSE (.rpm)
-sudo dnf install ./dist/crossfeed-2.3.0-1.x86_64.rpm
+sudo dnf install ./dist/crossfeed-2.3.1-1.x86_64.rpm
 
 # Fedora Silverblue / Kinoite / Bazzite / CoreOS (rpm-ostree)
-rpm-ostree install ./dist/crossfeed-2.3.0-1.x86_64.rpm
+rpm-ostree install ./dist/crossfeed-2.3.1-1.x86_64.rpm
 ```
 
 > [!NOTE]
