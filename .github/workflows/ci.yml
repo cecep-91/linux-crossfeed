@@ -14,7 +14,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck
-          shellcheck install.sh scripts/package.sh
+          shellcheck install.sh scripts/package.sh scripts/update.sh
 
   build-linux:
     runs-on: ubuntu-22.04

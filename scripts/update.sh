@@ -57,7 +57,6 @@ fetch_latest_release() {
     LATEST_TAG=$(echo "$response" | grep -m1 '"tag_name":' | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/')
     LATEST_VERSION="${LATEST_TAG#v}"
     RELEASE_URL=$(echo "$response" | grep -m1 '"html_url":' | sed -E 's/.*"html_url":[[:space:]]*"([^"]+)".*/\1/')
-    RELEASE_BODY=$(echo "$response" | grep -m1 '"body":' | sed -E 's/.*"body":[[:space:]]*"([^"]+)".*/\1/' || echo "")
 }
 
 # Version comparison: return 0 if $1 is strictly newer than $2
@@ -93,7 +92,6 @@ done
 LATEST_TAG=""
 LATEST_VERSION=""
 RELEASE_URL=""
-RELEASE_BODY=""
 GIT_COMMITS_BEHIND=0
 
 if ! fetch_latest_release; then
@@ -114,18 +112,18 @@ fi
 
 # Check git commits behind if inside git repo
 if [ "$IS_GIT_REPO" = "1" ]; then
-    (
-        cd "$ROOT_DIR"
-        git fetch origin >/dev/null 2>&1 || true
-        CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "development")
-        REMOTE_REF="origin/$CURRENT_BRANCH"
-        if git rev-parse --verify "$REMOTE_REF" >/dev/null 2>&1; then
-            GIT_COMMITS_BEHIND=$(git rev-list --count "HEAD..$REMOTE_REF" 2>/dev/null || echo 0)
-            if [ "$GIT_COMMITS_BEHIND" -gt 0 ]; then
-                HAS_UPDATE=1
-            fi
+    PREV_DIR="$PWD"
+    cd "$ROOT_DIR"
+    git fetch origin >/dev/null 2>&1 || true
+    CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "development")
+    REMOTE_REF="origin/$CURRENT_BRANCH"
+    if git rev-parse --verify "$REMOTE_REF" >/dev/null 2>&1; then
+        GIT_COMMITS_BEHIND=$(git rev-list --count "HEAD..$REMOTE_REF" 2>/dev/null || echo 0)
+        if [ "$GIT_COMMITS_BEHIND" -gt 0 ]; then
+            HAS_UPDATE=1
         fi
-    )
+    fi
+    cd "$PREV_DIR"
 fi
 
 # Handle --json output

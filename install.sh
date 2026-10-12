@@ -14,7 +14,6 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # Handle remote execution (curl | sh or wget | sh)
 SCRIPT_NAME="${0-}"
-SCRIPT_PATH=""
 if [ -n "$SCRIPT_NAME" ] && [ "$SCRIPT_NAME" != "bash" ] && [ "$SCRIPT_NAME" != "sh" ] && [ -f "$SCRIPT_NAME" ]; then
     SRC_DIR=$(cd "$(dirname "$SCRIPT_NAME")" && pwd)
 else
