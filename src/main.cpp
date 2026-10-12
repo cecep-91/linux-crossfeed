@@ -618,7 +618,7 @@ static int cmd_update(int argc, char** argv, bool check_only) {
     if (!script_path.empty()) {
         cmd = "\"" + script_path + "\"" + args;
     } else {
-        cmd = "curl -fsSL https://raw.githubusercontent.com/cecep-91/pipewire-crossfeed/main/scripts/update.sh | bash -s --" + args;
+        cmd = "curl -fsSL https://raw.githubusercontent.com/cecep-91/pipewire-crossfeed/development/scripts/update.sh | bash -s --" + args;
     }
 
     int ret = system(cmd.c_str());
@@ -669,7 +669,7 @@ int main(int argc, char** argv) {
         run_benchmark();
         return 0;
     } else if (cmd == "--version" || cmd == "-v") {
-        std::cout << "pipewire-crossfeed 2.2.0 (standalone)\n";
+        std::cout << "pipewire-crossfeed 2.3.0 (standalone)\n";
         return 0;
     } else if (cmd == "help" || cmd == "--help" || cmd == "-h") {
         print_help(argv[0]);

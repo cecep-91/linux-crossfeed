@@ -959,7 +959,7 @@ public:
         gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(app->window));
         gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
         gtk_about_dialog_set_program_name(GTK_ABOUT_DIALOG(dialog), "PipeWire Crossfeed");
-        gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(dialog), "2.2.0");
+        gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(dialog), "2.3.0");
         gtk_about_dialog_set_comments(GTK_ABOUT_DIALOG(dialog),
             "Standalone ultra-low-latency headphone crossfeed audio processor.\n"
             "Reduces headphone listening fatigue and spatializes stereo imaging.\n\n"

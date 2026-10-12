@@ -117,7 +117,7 @@ if [ "$IS_GIT_REPO" = "1" ]; then
     (
         cd "$ROOT_DIR"
         git fetch origin >/dev/null 2>&1 || true
-        CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+        CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "development")
         REMOTE_REF="origin/$CURRENT_BRANCH"
         if git rev-parse --verify "$REMOTE_REF" >/dev/null 2>&1; then
             GIT_COMMITS_BEHIND=$(git rev-list --count "HEAD..$REMOTE_REF" 2>/dev/null || echo 0)
@@ -197,7 +197,7 @@ fi
 if [ "$IS_GIT_REPO" = "1" ]; then
     echo "==> Updating from local Git repository ($ROOT_DIR)..."
     cd "$ROOT_DIR"
-    CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+    CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "development")
     echo "==> Pulling latest changes from branch '$CURRENT_BRANCH'..."
     git pull origin "$CURRENT_BRANCH"
 
