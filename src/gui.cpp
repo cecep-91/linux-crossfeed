@@ -14,6 +14,7 @@
 #include <cstring>
 #include <unistd.h>
 #include <limits.h>
+#include <thread>
 
 #if !GLIB_CHECK_VERSION(2, 74, 0)
 #ifndef G_APPLICATION_DEFAULT_FLAGS
@@ -753,6 +754,205 @@ public:
         app->reset_to_defaults();
     }
 
+    struct UpdateCheckData {
+        CrossfeedGuiApp* app = nullptr;
+        std::string current_ver;
+        std::string latest_ver;
+        std::string release_url;
+        bool has_update = false;
+        bool success = false;
+        int commits_behind = 0;
+    };
+
+    void run_gui_upgrade() {
+        GtkWidget* prog_dlg = gtk_message_dialog_new(
+            window ? GTK_WINDOW(window) : nullptr,
+            GTK_DIALOG_MODAL,
+            GTK_MESSAGE_INFO,
+            GTK_BUTTONS_NONE,
+            "Upgrading Crossfeed..."
+        );
+        gtk_message_dialog_format_secondary_text(
+            GTK_MESSAGE_DIALOG(prog_dlg),
+            "Downloading and installing the latest release. Please wait a moment..."
+        );
+        gtk_widget_show_all(prog_dlg);
+
+        std::thread([this, prog_dlg]() {
+            std::string exe = get_self_executable_path();
+            std::string cmd = "\"" + exe + "\" upgrade";
+            int ret = system(cmd.c_str());
+            bool ok = (WIFEXITED(ret) && WEXITSTATUS(ret) == 0);
+
+            struct UpgradeResult {
+                CrossfeedGuiApp* app;
+                GtkWidget* prog_dlg;
+                bool ok;
+            };
+
+            auto* res = new UpgradeResult{this, prog_dlg, ok};
+            g_idle_add([](gpointer p) -> gboolean {
+                auto* r = static_cast<UpgradeResult*>(p);
+                gtk_widget_destroy(r->prog_dlg);
+
+                if (r->ok) {
+                    GtkWidget* ok_dlg = gtk_message_dialog_new(
+                        r->app->window ? GTK_WINDOW(r->app->window) : nullptr,
+                        GTK_DIALOG_MODAL,
+                        GTK_MESSAGE_INFO,
+                        GTK_BUTTONS_OK,
+                        "Upgrade Successful!"
+                    );
+                    gtk_message_dialog_format_secondary_text(
+                        GTK_MESSAGE_DIALOG(ok_dlg),
+                        "Crossfeed has been upgraded to the latest version and the audio engine has been refreshed."
+                    );
+                    g_signal_connect(ok_dlg, "response", G_CALLBACK(gtk_widget_destroy), nullptr);
+                    gtk_widget_show_all(ok_dlg);
+                    r->app->refresh_from_engine();
+                } else {
+                    GtkWidget* err_dlg = gtk_message_dialog_new(
+                        r->app->window ? GTK_WINDOW(r->app->window) : nullptr,
+                        GTK_DIALOG_MODAL,
+                        GTK_MESSAGE_ERROR,
+                        GTK_BUTTONS_OK,
+                        "Upgrade Failed"
+                    );
+                    gtk_message_dialog_format_secondary_text(
+                        GTK_MESSAGE_DIALOG(err_dlg),
+                        "An error occurred during upgrade. Run 'crossfeed upgrade' in your terminal to view detailed logs."
+                    );
+                    g_signal_connect(err_dlg, "response", G_CALLBACK(gtk_widget_destroy), nullptr);
+                    gtk_widget_show_all(err_dlg);
+                }
+
+                delete r;
+                return G_SOURCE_REMOVE;
+            }, res);
+        }).detach();
+    }
+
+    static void on_check_updates_clicked(GtkWidget* /*widget*/, gpointer user_data) {
+        auto* app = static_cast<CrossfeedGuiApp*>(user_data);
+        if (!app) return;
+
+        std::thread([app]() {
+            std::string exe = get_self_executable_path();
+            std::string cmd = "\"" + exe + "\" check-update --json 2>/dev/null";
+
+            std::string json_output;
+            FILE* fp = popen(cmd.c_str(), "r");
+            if (fp) {
+                char buf[512];
+                while (fgets(buf, sizeof(buf), fp)) {
+                    json_output += buf;
+                }
+                pclose(fp);
+            }
+
+            auto* data = new UpdateCheckData();
+            data->app = app;
+            if (!json_output.empty() && json_output.find("\"error\"") == std::string::npos) {
+                data->success = true;
+                data->current_ver = parse_json_value(json_output, "current");
+                data->latest_ver = parse_json_value(json_output, "latest");
+                data->release_url = parse_json_value(json_output, "release_url");
+                data->has_update = (parse_json_value(json_output, "has_update") == "true");
+                std::string behind = parse_json_value(json_output, "git_commits_behind");
+                if (!behind.empty()) {
+                    try { data->commits_behind = std::stoi(behind); } catch (...) {}
+                }
+            } else {
+                data->success = false;
+            }
+
+            g_idle_add([](gpointer p) -> gboolean {
+                auto* d = static_cast<UpdateCheckData*>(p);
+                CrossfeedGuiApp* a = d->app;
+
+                if (!d->success) {
+                    GtkWidget* msg = gtk_message_dialog_new(
+                        a->window ? GTK_WINDOW(a->window) : nullptr,
+                        GTK_DIALOG_MODAL,
+                        GTK_MESSAGE_WARNING,
+                        GTK_BUTTONS_OK,
+                        "Unable to Check for Updates"
+                    );
+                    gtk_message_dialog_format_secondary_text(
+                        GTK_MESSAGE_DIALOG(msg),
+                        "Could not connect to GitHub. Please verify your internet connection or visit https://github.com/cecep-91/pipewire-crossfeed/releases."
+                    );
+                    g_signal_connect(msg, "response", G_CALLBACK(gtk_widget_destroy), nullptr);
+                    gtk_widget_show_all(msg);
+                } else if (d->has_update) {
+                    GtkWidget* dlg = gtk_dialog_new_with_buttons(
+                        "Crossfeed Update Available",
+                        a->window ? GTK_WINDOW(a->window) : nullptr,
+                        GTK_DIALOG_MODAL,
+                        "Cancel", GTK_RESPONSE_CANCEL,
+                        "View Release", GTK_RESPONSE_HELP,
+                        "Upgrade Now", GTK_RESPONSE_APPLY,
+                        nullptr
+                    );
+                    gtk_dialog_set_default_response(GTK_DIALOG(dlg), GTK_RESPONSE_APPLY);
+
+                    GtkWidget* content = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
+                    gtk_container_set_border_width(GTK_CONTAINER(content), 16);
+                    GtkWidget* vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+
+                    GtkWidget* title = gtk_label_new(nullptr);
+                    std::string title_str = "<span size='large' weight='bold'>A new version of Crossfeed is available!</span>";
+                    gtk_label_set_markup(GTK_LABEL(title), title_str.c_str());
+                    gtk_label_set_xalign(GTK_LABEL(title), 0.0);
+                    gtk_box_pack_start(GTK_BOX(vbox), title, FALSE, FALSE, 0);
+
+                    std::ostringstream desc;
+                    desc << "Current version: <b>" << d->current_ver << "</b>\n"
+                         << "Latest release:  <b>v" << d->latest_ver << "</b>";
+                    if (d->commits_behind > 0) {
+                        desc << "\n(" << d->commits_behind << " newer commit(s) on git branch)";
+                    }
+                    desc << "\n\nWould you like to upgrade now? The audio engine will be automatically updated and refreshed.";
+
+                    GtkWidget* body = gtk_label_new(nullptr);
+                    gtk_label_set_markup(GTK_LABEL(body), desc.str().c_str());
+                    gtk_label_set_xalign(GTK_LABEL(body), 0.0);
+                    gtk_box_pack_start(GTK_BOX(vbox), body, FALSE, FALSE, 0);
+
+                    gtk_box_pack_start(GTK_BOX(content), vbox, TRUE, TRUE, 0);
+                    gtk_widget_show_all(dlg);
+
+                    gint res = gtk_dialog_run(GTK_DIALOG(dlg));
+                    if (res == GTK_RESPONSE_HELP) {
+                        std::string url = d->release_url.empty() ? "https://github.com/cecep-91/pipewire-crossfeed/releases" : d->release_url;
+                        gtk_show_uri_on_window(a->window ? GTK_WINDOW(a->window) : nullptr, url.c_str(), GDK_CURRENT_TIME, nullptr);
+                        gtk_widget_destroy(dlg);
+                    } else if (res == GTK_RESPONSE_APPLY) {
+                        gtk_widget_destroy(dlg);
+                        a->run_gui_upgrade();
+                    } else {
+                        gtk_widget_destroy(dlg);
+                    }
+                } else {
+                    GtkWidget* msg = gtk_message_dialog_new(
+                        a->window ? GTK_WINDOW(a->window) : nullptr,
+                        GTK_DIALOG_MODAL,
+                        GTK_MESSAGE_INFO,
+                        GTK_BUTTONS_OK,
+                        "Crossfeed is Up to Date"
+                    );
+                    std::string sec = "You are running Crossfeed version " + d->current_ver + ", which is the latest available release.";
+                    gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(msg), "%s", sec.c_str());
+                    g_signal_connect(msg, "response", G_CALLBACK(gtk_widget_destroy), nullptr);
+                    gtk_widget_show_all(msg);
+                }
+
+                delete d;
+                return G_SOURCE_REMOVE;
+            }, data);
+        }).detach();
+    }
+
     static void on_about_clicked(GtkWidget* /*widget*/, gpointer user_data) {
         auto* app = static_cast<CrossfeedGuiApp*>(user_data);
         GtkWidget* dialog = gtk_about_dialog_new();
@@ -768,8 +968,11 @@ public:
             "• Ctrl+1 .. Ctrl+5: Select Presets\n"
             "• Ctrl+R: Reset to Defaults\n"
             "• Escape / Ctrl+W: Hide window to tray\n"
-            "• Ctrl+Q: Quit Crossfeed");
-        gtk_about_dialog_set_website(GTK_ABOUT_DIALOG(dialog), "https://github.com/ikuu/pipewire-crossfeed");
+            "• Ctrl+Q: Quit Crossfeed\n\n"
+            "Easy Upgrades:\n"
+            "• Menu > Check for Updates... (in-app one-click update)\n"
+            "• Terminal: 'crossfeed upgrade'");
+        gtk_about_dialog_set_website(GTK_ABOUT_DIALOG(dialog), "https://github.com/cecep-91/pipewire-crossfeed");
         gtk_about_dialog_set_website_label(GTK_ABOUT_DIALOG(dialog), "GitHub Repository");
         gtk_about_dialog_set_license_type(GTK_ABOUT_DIALOG(dialog), GTK_LICENSE_MIT_X11);
         gtk_about_dialog_set_logo_icon_name(GTK_ABOUT_DIALOG(dialog), "audio-headphones");
@@ -894,6 +1097,10 @@ public:
 
         gtk_menu_shell_append(GTK_MENU_SHELL(tray_menu), item_presets);
 
+        GtkWidget* item_updates = gtk_menu_item_new_with_label("Check for Updates...");
+        g_signal_connect(item_updates, "activate", G_CALLBACK(on_check_updates_clicked), this);
+        gtk_menu_shell_append(GTK_MENU_SHELL(tray_menu), item_updates);
+
         GtkWidget* sep2 = gtk_separator_menu_item_new();
         gtk_menu_shell_append(GTK_MENU_SHELL(tray_menu), sep2);
 
@@ -965,6 +1172,10 @@ public:
         gtk_menu_shell_append(GTK_MENU_SHELL(app_menu), m_presets_item);
 
         gtk_menu_shell_append(GTK_MENU_SHELL(app_menu), gtk_separator_menu_item_new());
+
+        GtkWidget* m_update_item = gtk_menu_item_new_with_label("Check for Updates...");
+        g_signal_connect(m_update_item, "activate", G_CALLBACK(on_check_updates_clicked), this);
+        gtk_menu_shell_append(GTK_MENU_SHELL(app_menu), m_update_item);
 
         GtkWidget* m_about = gtk_menu_item_new_with_label("About Crossfeed");
         g_signal_connect(m_about, "activate", G_CALLBACK(on_about_clicked), this);

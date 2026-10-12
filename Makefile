@@ -35,7 +35,7 @@ SRCS = src/main.cpp \
 OBJS = $(SRCS:.cpp=.o)
 TARGET = bin/crossfeed
 
-.PHONY: all clean install uninstall bench deb rpm xbps pkg check-deps test
+.PHONY: all clean install uninstall bench deb rpm xbps pkg check-deps test update upgrade check-update
 
 all: $(TARGET)
 
@@ -95,6 +95,12 @@ xbps: $(TARGET)
 
 pkg: $(TARGET)
 	bash ./scripts/package.sh all
+
+check-update:
+	@bash ./scripts/update.sh --check
+
+update upgrade:
+	@bash ./scripts/update.sh
 
 clean:
 	rm -f $(OBJS) $(OBJS:.o=.d) $(TARGET) $(TEST_TARGET)

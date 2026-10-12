@@ -10,6 +10,8 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <iomanip>
+#include <vector>
+#include <limits.h>
 
 using namespace crossfeed;
 
@@ -77,6 +79,8 @@ static void print_help(const char* prog) {
               << "  preset <name>     Apply a psychoacoustic preset (e.g. meier, chumoy, bs2b, linkwitz, studio)\n"
               << "  set               Adjust filter parameters live\n"
               << "  bench             Run DSP throughput and CPU performance benchmark\n"
+              << "  upgrade, update   Upgrade crossfeed to the latest release\n"
+              << "  check-update      Check if a newer version is available on GitHub\n"
               << "  help, --help      Show this help message\n"
               << "  --version         Show version information\n\n"
               << "Run Options:\n"
@@ -566,6 +570,64 @@ static int cmd_preset(int argc, char** argv) {
     }
 }
 
+static int cmd_update(int argc, char** argv, bool check_only) {
+    std::string script_path;
+    std::vector<std::string> candidates = {
+        "./scripts/update.sh",
+        "scripts/update.sh"
+    };
+
+    char exe_buf[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", exe_buf, sizeof(exe_buf) - 1);
+    if (len > 0) {
+        exe_buf[len] = '\0';
+        std::string exe_path(exe_buf);
+        size_t last_slash = exe_path.find_last_of('/');
+        if (last_slash != std::string::npos) {
+            std::string dir = exe_path.substr(0, last_slash);
+            candidates.push_back(dir + "/../scripts/update.sh");
+            candidates.push_back(dir + "/scripts/update.sh");
+        }
+    }
+
+    const char* home = std::getenv("HOME");
+    if (home) {
+        candidates.push_back(std::string(home) + "/.local/share/pipewire-crossfeed/update.sh");
+    }
+    candidates.push_back("/usr/share/pipewire-crossfeed/update.sh");
+    candidates.push_back("/usr/local/share/pipewire-crossfeed/update.sh");
+
+    for (const auto& c : candidates) {
+        if (access(c.c_str(), X_OK) == 0) {
+            script_path = c;
+            break;
+        }
+    }
+
+    std::string cmd;
+    std::string args;
+    if (check_only) {
+        args += " --check";
+    }
+    for (int i = 2; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--check" && check_only) continue;
+        args += " " + a;
+    }
+
+    if (!script_path.empty()) {
+        cmd = "\"" + script_path + "\"" + args;
+    } else {
+        cmd = "curl -fsSL https://raw.githubusercontent.com/cecep-91/pipewire-crossfeed/main/scripts/update.sh | bash -s --" + args;
+    }
+
+    int ret = system(cmd.c_str());
+    if (WIFEXITED(ret)) {
+        return WEXITSTATUS(ret);
+    }
+    return ret;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         return run_gui(argc, argv);
@@ -599,6 +661,10 @@ int main(int argc, char** argv) {
         return cmd_preset(argc, argv);
     } else if (cmd == "set") {
         return cmd_set(argc, argv);
+    } else if (cmd == "upgrade" || cmd == "update") {
+        return cmd_update(argc, argv, false);
+    } else if (cmd == "check-update" || cmd == "check") {
+        return cmd_update(argc, argv, true);
     } else if (cmd == "bench") {
         run_benchmark();
         return 0;

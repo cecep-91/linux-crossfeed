@@ -165,12 +165,45 @@ rpm-ostree install ./dist/crossfeed-2.2.0-1.x86_64.rpm
 git clone https://github.com/cecep-91/pipewire-crossfeed.git
 cd pipewire-crossfeed
 make -j$(nproc)
-sudo make install
+./install.sh
 ```
 
-To uninstall:
+Or install/upgrade directly with a single command without cloning:
 ```sh
-sudo make uninstall
+curl -fsSL https://raw.githubusercontent.com/cecep-91/pipewire-crossfeed/main/install.sh | bash
+```
+
+To uninstall cleanly:
+```sh
+./install.sh --uninstall
+```
+
+---
+
+## Upgrading Crossfeed
+
+Crossfeed makes upgrading seamless across all environments:
+
+### 1. In-App One-Click Upgrade (GUI)
+- Open Crossfeed and open the header menu **`☰`** (or right-click the system tray icon).
+- Select **"Check for Updates..."**.
+- When an update is detected, click **"Upgrade Now"**. Crossfeed automatically downloads the latest release, updates files, and restarts the audio engine with zero downtime.
+
+### 2. Command Line (CLI)
+```sh
+# Check if an update is available:
+crossfeed check-update
+
+# Upgrade to the latest version:
+crossfeed upgrade
+```
+
+### 3. Git Source Trees
+If you cloned the repository locally:
+```sh
+make update
+# or:
+./install.sh --update
 ```
 
 ---
