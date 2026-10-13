@@ -7,7 +7,7 @@ namespace crossfeed {
 AlsaBackend::AlsaBackend() = default;
 
 AlsaBackend::~AlsaBackend() {
-    stop();
+    cleanup();
 }
 
 std::vector<SinkDevice> AlsaBackend::list_sinks() {
@@ -114,7 +114,7 @@ bool AlsaBackend::run() {
     std::vector<float> in_buf(buffer_frames_ * 2);
     std::vector<float> out_buf(buffer_frames_ * 2);
 
-    while (running_.load()) {
+    while (!stop_requested_.load()) {
         snd_pcm_sframes_t r = snd_pcm_readi(capture_handle_, in_buf.data(), buffer_frames_);
         if (r < 0) {
             r = snd_pcm_recover(capture_handle_, static_cast<int>(r), 0);
@@ -137,14 +137,19 @@ bool AlsaBackend::run() {
         }
     }
 
-    stop();
+    running_.store(false);
+    cleanup();
     return true;
 }
 
 void AlsaBackend::stop() {
+    stop_requested_.store(true);
+}
+
+void AlsaBackend::cleanup() {
     running_.store(false);
     if (playback_handle_) {
-        snd_pcm_drain(playback_handle_);
+        snd_pcm_drop(playback_handle_);
         snd_pcm_close(playback_handle_);
         playback_handle_ = nullptr;
     }

@@ -27,6 +27,7 @@ public:
     std::vector<SinkDevice> list_sinks() override;
 
 private:
+    void cleanup();
     bool query_sinks(std::string& default_sink, std::vector<SinkDevice>& sinks);
     bool load_null_sink();
     void unload_null_sink();
@@ -46,6 +47,7 @@ private:
     pa_simple* play_stream_ = nullptr;
 
     std::atomic<bool> running_{false};
+    std::atomic<bool> stop_requested_{false};
 };
 
 } // namespace crossfeed

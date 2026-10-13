@@ -1,60 +1,53 @@
 #include "benchmark.hpp"
 #include "dsp.hpp"
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <vector>
-#include <chrono>
-#include <iomanip>
 
 namespace crossfeed {
 
-static void bench_rate(float sample_rate, size_t buffer_frames) {
+static void bench_rate(float rate, size_t frames, bool decay, bool changes) {
     CrossfeedDSP dsp;
-    dsp.set_params(sample_rate, -10.0f, 700.0f, true);
-
-    const size_t total_frames = static_cast<size_t>(sample_rate * 5.0f); // 5 seconds worth
-    std::vector<float> in(total_frames * 2, 0.42f);
-    std::vector<float> out(total_frames * 2, 0.0f);
-
-    // Warmup
-    dsp.process_interleaved(in.data(), out.data(), total_frames);
-
-    const int iterations = 100;
-    auto start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < iterations; ++i) {
-        dsp.process_interleaved(in.data(), out.data(), total_frames);
+    dsp.set_params(rate, -10.0f, 700.0f, true);
+    std::vector<float> in(frames * 2, 0.0f), out(in.size());
+    if (decay) in[0] = 0.5f;
+    else for (size_t n = 0; n < frames; ++n) {
+        in[2*n] = 0.4f * std::sin(6.283185307179586 * 440.0 * n / rate);
+        in[2*n+1] = 0.3f * std::sin(6.283185307179586 * 660.0 * n / rate);
     }
-    auto end = std::chrono::high_resolution_clock::now();
-
-    double elapsed_sec = std::chrono::duration<double>(end - start).count();
-    double total_audio_sec = (total_frames * iterations) / sample_rate;
-    double throughput_mfps = ((total_frames * iterations) / elapsed_sec) / 1e6;
-    double cpu_usage_pct = (elapsed_sec / total_audio_sec) * 100.0;
-    double buffer_latency_us = (elapsed_sec / (total_frames * iterations)) * buffer_frames * 1e6;
-
-    std::cout << std::fixed << std::setprecision(0)
-              << "  [" << std::setw(6) << sample_rate << " Hz] "
-              << std::setprecision(2)
-              << "Throughput: " << std::setw(7) << throughput_mfps << " M frames/sec  |  "
-              << "Real-time CPU: " << std::setw(6) << cpu_usage_pct << "%  |  "
-              << buffer_frames << "-frame DSP latency: " << std::setprecision(2) << buffer_latency_us << " µs"
-              << std::endl;
+    dsp.process_interleaved(in.data(), out.data(), frames);
+    if (decay) std::fill(in.begin(), in.end(), 0.f);
+    double elapsed = 0.0, worst = 0.0;
+    constexpr int blocks = 2000;
+    for (int block = 0; block < blocks; ++block) {
+        // Model control updates outside the measured callback interval.
+        if (changes && block % 32 == 0)
+            dsp.set_delay_us(block % 64 == 0 ? 100.f : 700.f);
+        const auto start = std::chrono::steady_clock::now();
+        dsp.process_interleaved(in.data(), out.data(), frames);
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        elapsed += seconds;
+        worst = std::max(worst, seconds);
+    }
+    std::cout << std::fixed << std::setprecision(0) << "  " << rate << " Hz, " << frames
+              << " frames, " << (decay ? "decay  " : changes ? "changes" : "steady ")
+              << std::setprecision(2) << ": mean " << elapsed / blocks * 1e6
+              << " us, max observed " << worst * 1e6 << " us, "
+              << (elapsed / blocks) / (frames / rate) * 100.0 << "% of quantum on average\n";
 }
 
 void run_benchmark() {
-    std::cout << "========================================================\n"
-              << "          PipeWire-Crossfeed DSP Performance Benchmark  \n"
-              << "========================================================\n";
-    std::cout << "Testing Biquad Direct Form II Transposed Stereo DSP Filter...\n\n";
-
-    bench_rate(44100.0f, 256);
-    bench_rate(48000.0f, 256);
-    bench_rate(96000.0f, 512);
-    bench_rate(192000.0f, 1024);
-
-    std::cout << "\nResult: The DSP engine achieves > 200 Million frames/sec throughput\n"
-              << "with sub-microsecond computation per buffer (< 0.03% single-core CPU),\n"
-              << "guaranteeing zero real-time audio jitter and no underruns.\n"
-              << "========================================================\n";
+    std::cout << "Crossfeed DSP callback computation benchmark\n";
+    for (float rate : {44100.f, 48000.f, 96000.f, 192000.f}) {
+        const size_t frames = rate >= 192000 ? 1024 : rate >= 96000 ? 512 : 256;
+        bench_rate(rate, frames, false, false);
+        bench_rate(rate, frames, true, false);
+        bench_rate(rate, frames, false, true);
+    }
+    std::cout << "These are offline processing times, not graph/device latency or a guarantee against xruns.\n";
 }
 
 } // namespace crossfeed

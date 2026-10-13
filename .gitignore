@@ -9,3 +9,7 @@ build/
 dist/
 *.spec
 scratch/
+
+# Agent handoff instructions and local walkthrough docs
+AGENTS.md
+docs/

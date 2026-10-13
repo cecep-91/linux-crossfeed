@@ -6,8 +6,6 @@
     <a href="https://github.com/cecep-91/pipewire-crossfeed/releases"><img src="https://img.shields.io/github/v/release/cecep-91/pipewire-crossfeed?color=blue&label=Release" alt="Latest Release"/></a>
     <img src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=c%2B%2B" alt="C++17"/>
     <img src="https://img.shields.io/badge/Audio-PipeWire%20%7C%20Pulse%20%7C%20ALSA-informational" alt="Audio Backend"/>
-    <img src="https://img.shields.io/badge/DSP%20Latency-%3C3%C2%B5s-brightgreen" alt="DSP Latency"/>
-    <img src="https://img.shields.io/badge/CPU-%3C0.05%25-brightgreen" alt="CPU Usage"/>
     <img src="https://img.shields.io/badge/Packaging-xbps%20%7C%20deb%20%7C%20rpm-orange" alt="Packages"/>
     <img src="https://img.shields.io/badge/License-MIT-green" alt="License"/>
   </p>
@@ -43,7 +41,7 @@ Crossfeed rectifies this by routing an acoustically modeled, frequency-sculpted,
          │                       (High-frequency skull absorption)
          │                             │
          │                       [ All-Pass Filter (APF) ]
-         │                       (Comb-filtering phase alignment)
+         │                       (Additional cross-path phase rotation)
          │                             │
          │                       [ Fractional Delay Line ]
          │                       (Interaural Time Delay, 0–800 µs)
@@ -64,18 +62,24 @@ Crossfeed rectifies this by routing an acoustically modeled, frequency-sculpted,
 
 ---
 
+### Implementation safety and walkthrough
+
+See the [interactive local walkthrough](docs/walkthrough.html), [technical change log and verification](docs/walkthrough.md), and [agent/contributor guide](AGENTS.md).
+
+The audio callback uses ownership-based parameter snapshots, no mutex-taking getters or setters, and fixed storage. Ordinary parameter changes crossfade over 20 ms; delay changes also ramp. PipeWire prepares changed-rate coefficients on its main loop and uses dry passthrough until a matching snapshot is available. Rates from 8 to 192 kHz are accepted; filter frequencies are capped at 45% of sample rate. NaN/Inf settings are rejected.
+
 ### 2. Core Acoustic Elements
 
 #### Interaural Level Difference (ILD)
-The skull acts as an acoustic barrier, attenuating the opposite-ear signal. Crossfeed provides adjustable opposite-ear blend attenuation from **-30.0 dB to -6.0 dB** (default: **-10.0 dB**), mimicking varying virtual speaker angles.
+The skull acts as an acoustic barrier, attenuating the opposite-ear signal. Crossfeed provides adjustable opposite-ear blend attenuation from **-30.0 dB to -3.0 dB** (default: **-10.0 dB**), mimicking varying virtual speaker angles.
 
 #### Interaural Time Delay (ITD)
 Sound travels at approximately $343\text{ m/s}$ in dry air. For an average human head width ($\sim 18\text{–}20\text{ cm}$), audio from a speaker angled at $30^\circ$ takes an extra $250\text{–}300\ \mu\text{s}$ to travel around the skull curvature to the opposite ear.
-- **Engine Implementation**: A dedicated 2048-sample circular buffer with **sub-sample fractional linear interpolation**, allowing continuous jitter-free delay modulation between **$0\ \mu\text{s}$ and $800\ \mu\text{s}$** without comb stepping or zipper noise.
+- **Engine Implementation**: A dedicated 2048-sample circular buffer with **sub-sample fractional linear interpolation**, with a configurable additional delay of **0–800 µs**. The delay ramps during parameter transitions. Low-pass and all-pass filters add their own frequency-dependent delay, so this setting is not the complete interaural time difference.
 
-#### Phase Alignment & Comb-Filtering Prevention
+#### All-Pass Phase Rotation
 When a delayed contralateral signal recombines with direct audio, destructive phase cancellation (comb filtering) can produce a hollow, thin sound and sap bass impact.
-- **Engine Implementation**: A 2nd-order Audio EQ Cookbook **All-Pass Filter (APF)** with flat magnitude response ($200\text{–}4000\text{ Hz}$). Long omnidirectional bass wavelengths remain coherently in-phase to preserve punch, while higher frequencies rotate naturally to deliver spatial localization.
+- **Engine Implementation**: A 2nd-order Audio EQ Cookbook **All-Pass Filter (APF)** with a configurable center from 200–4000 Hz. Its own magnitude response is flat, but summing its output with the direct path can create frequency-response dips. It does not guarantee phase alignment or eliminate comb filtering.
 
 #### Acoustic Head Shadow
 Human tissue and skull geometry do not absorb all frequencies equally. Low bass diffuses freely around obstacles, whereas treble ($>1.5\text{ kHz}$) is absorbed and shadowed.
@@ -83,7 +87,7 @@ Human tissue and skull geometry do not absorb all frequencies equally. Low bass 
 
 #### Center Summing Trim Matrix
 Summing Left and Right signals adds acoustic energy to center-panned mono elements (vocals, kick drums, bass), producing a $+1.5\text{ dB}$ to $+3.0\text{ dB}$ center boost that can cause $0\text{ dBFS}$ digital clipping overshoots.
-- **Engine Implementation**: A master gain compensation stage ($-6.0\text{ dB}$ to $0.0\text{ dB}$, default: $-1.5\text{ dB}$) that prevents volume build-up and maintains transparent LUFS loudness parity with the bypassed state.
+- **Engine Implementation**: A master gain compensation stage ($-6.0\text{ dB}$ to $0.0\text{ dB}$, default: $-1.5\text{ dB}$) that attenuates the entire output. It does not guarantee matched loudness, a flat mono response, or protection against all clipping.
 
 ---
 
@@ -93,20 +97,20 @@ The engine features a dedicated toggle between two listening philosophies:
 
 | Mode | Processing Pipeline | Best Suited For |
 |---|---|---|
-| **All Spatial Effects** | Full psychoacoustic model: ITD fractional delay line + Phase APF + Head Shadow absorption + Center Trim | Modern music, complex stereo mixes, binaural immersion, spatial staging |
-| **Pure Crossfeed** | Classic analog low-shelf blend + low-pass filter only (zero delay, zero phase shift, 0 dB trim) | Vintage recordings, analog purists, minimalist low-latency setups |
+| **All Spatial Effects** | Direct shelf + cross low-pass + fractional delay + APF + shadow low-pass + output trim | Modern music, complex stereo mixes, binaural immersion, spatial staging |
+| **Pure Crossfeed** | Direct low-shelf + Q=0.5 cross low-pass; bypasses the additional delay/APF/shadow/trim. Filter phase and group delay remain. | Vintage recordings, analog purists, minimalist low-latency setups |
 
 ---
 
 ### 4. Acoustic Emulation Presets
 
-Inside the **`Not for me options :v`** expander, you'll find pre-tuned models calibrated to famous hardware circuits and acoustic benchmarks:
+Inside the **`Not for me options :v`** expander, you'll find presets inspired by familiar crossfeed designs. These names do not establish circuit-equivalent emulation or a calibrated physical speaker angle. The existing preset values are preserved; the Meier advanced mono response has approximately a −5.6 dB dip near 410 Hz at 48 kHz. The walkthrough plots the complete response:
 
 - **Jan Meier (Corda)**: $-9.5\text{ dB}$ blend, $650\text{ Hz}$ crossover, $280\ \mu\text{s}$ delay, $1500\text{ Hz}$ APF, $-1.5\text{ dB}$ trim, $3200\text{ Hz}$ shadow. Natural, fatigue-free presentation.
-- **Chu Moy (HeadWize)**: $-6.0\text{ dB}$ blend, $700\text{ Hz}$ crossover, $260\ \mu\text{s}$ delay, $2000\text{ Hz}$ APF, $-2.0\text{ dB}$ trim, $2800\text{ Hz}$ shadow. Classic analog RC crossfeed recreation.
+- **Chu Moy (HeadWize)**: $-6.0\text{ dB}$ blend, $700\text{ Hz}$ crossover, $260\ \mu\text{s}$ delay, $2000\text{ Hz}$ APF, $-2.0\text{ dB}$ trim, $2800\text{ Hz}$ shadow. Preset inspired by analog crossfeed.
 - **Bauer BS2B**: $-4.5\text{ dB}$ blend, $700\text{ Hz}$ crossover, $350\ \mu\text{s}$ delay, $1200\text{ Hz}$ APF, $-2.5\text{ dB}$ trim, $2500\text{ Hz}$ shadow. Higher cross-feed simulation for pronounced centering.
 - **Siegfried Linkwitz**: $-7.0\text{ dB}$ blend, $1200\text{ Hz}$ crossover, $220\ \mu\text{s}$ delay, $1600\text{ Hz}$ APF, $-1.8\text{ dB}$ trim, $4000\text{ Hz}$ shadow. Wide-stage loudspeaker monitor emulation.
-- **Natural Studio 30°**: $-8.0\text{ dB}$ blend, $850\text{ Hz}$ crossover, $250\ \mu\text{s}$ delay, $1800\text{ Hz}$ APF, $-1.5\text{ dB}$ trim, $3500\text{ Hz}$ shadow. Reference equilateral studio monitor geometry.
+- **Natural Studio 30°**: $-8.0\text{ dB}$ blend, $850\text{ Hz}$ crossover, $250\ \mu\text{s}$ delay, $1800\text{ Hz}$ APF, $-1.5\text{ dB}$ trim, $3500\text{ Hz}$ shadow. A preset inspired by near-field monitor listening.
 
 ---
 
@@ -134,13 +138,13 @@ xbps-rindex -a dist/*.xbps
 sudo xbps-install -R dist crossfeed
 
 # Debian / Ubuntu / Linux Mint (.deb)
-sudo apt install ./dist/crossfeed_2.3.1-1_amd64.deb
+sudo apt install ./dist/crossfeed_2.4.0-1_amd64.deb
 
 # Fedora / RHEL / openSUSE (.rpm)
-sudo dnf install ./dist/crossfeed-2.3.1-1.x86_64.rpm
+sudo dnf install ./dist/crossfeed-2.4.0-1.x86_64.rpm
 
 # Fedora Silverblue / Kinoite / Bazzite / CoreOS (rpm-ostree)
-rpm-ostree install ./dist/crossfeed-2.3.1-1.x86_64.rpm
+rpm-ostree install ./dist/crossfeed-2.4.0-1.x86_64.rpm
 ```
 
 > [!NOTE]
@@ -232,7 +236,7 @@ The same binary provides full CLI control:
 ```sh
 # Service management
 crossfeed start     # Start background engine
-crossfeed status    # View active routing, latency, and parameters
+crossfeed status    # View active routing, buffer/quantum, and parameters
 crossfeed stop      # Stop engine and restore default routing
 crossfeed restart   # Restart engine
 
@@ -274,3 +278,18 @@ crossfeed bench
 ## License
 
 Released under the [MIT License](LICENSE). Copyright © 2024–2026.
+
+## Development checks
+
+```sh
+make -j4
+make test test-rt test-routing
+make test-sanitize
+make test-tsan
+make bench
+make preview
+```
+
+Core tests do not require GTK development headers. Sanitizer targets need the compiler's matching sanitizer runtime/development packages (Void: `libsanitizer-devel`). The IPC test needs Unix socket permissions. The routing failure test replaces routing commands and uses an isolated PipeWire runtime directory.
+
+The GUI reports audio block duration; this is not complete graph/device latency. `make bench` reports measured offline callback time for steady audio, decaying silence, and parameter changes. Its result is not a guarantee against xruns. PulseAudio cancellation can remain blocked until its simple API I/O returns; hardware hotplug and live routing require separate integration testing.

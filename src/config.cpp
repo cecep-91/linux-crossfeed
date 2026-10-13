@@ -1,4 +1,5 @@
 #include "config.hpp"
+#include "dsp.hpp"
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -85,32 +86,56 @@ bool Config::load_state(ConfigState& state) {
 
     val = extract_val("level_db");
     if (!val.empty()) {
-        try { state.level_db = std::stof(val); } catch (...) {}
+        try {
+            size_t end = 0;
+            const float value = std::stof(val, &end);
+            if (end == val.size() && std::isfinite(value)) state.level_db = value;
+        } catch (...) {}
     }
 
     val = extract_val("freq_hz");
     if (!val.empty()) {
-        try { state.freq_hz = std::stof(val); } catch (...) {}
+        try {
+            size_t end = 0;
+            const float value = std::stof(val, &end);
+            if (end == val.size() && std::isfinite(value)) state.freq_hz = value;
+        } catch (...) {}
     }
 
     val = extract_val("delay_us");
     if (!val.empty()) {
-        try { state.delay_us = std::stof(val); } catch (...) {}
+        try {
+            size_t end = 0;
+            const float value = std::stof(val, &end);
+            if (end == val.size() && std::isfinite(value)) state.delay_us = value;
+        } catch (...) {}
     }
 
     val = extract_val("phase_apf_hz");
     if (!val.empty()) {
-        try { state.phase_apf_hz = std::stof(val); } catch (...) {}
+        try {
+            size_t end = 0;
+            const float value = std::stof(val, &end);
+            if (end == val.size() && std::isfinite(value)) state.phase_apf_hz = value;
+        } catch (...) {}
     }
 
     val = extract_val("center_trim_db");
     if (!val.empty()) {
-        try { state.center_trim_db = std::stof(val); } catch (...) {}
+        try {
+            size_t end = 0;
+            const float value = std::stof(val, &end);
+            if (end == val.size() && std::isfinite(value)) state.center_trim_db = value;
+        } catch (...) {}
     }
 
     val = extract_val("shadow_hz");
     if (!val.empty()) {
-        try { state.shadow_hz = std::stof(val); } catch (...) {}
+        try {
+            size_t end = 0;
+            const float value = std::stof(val, &end);
+            if (end == val.size() && std::isfinite(value)) state.shadow_hz = value;
+        } catch (...) {}
     }
 
     val = extract_val("advanced_effects");
@@ -130,12 +155,20 @@ bool Config::load_state(ConfigState& state) {
 
     val = extract_val("sample_rate");
     if (!val.empty()) {
-        try { state.sample_rate = std::stoul(val); } catch (...) {}
+        try {
+            size_t end = 0;
+            const unsigned long value = std::stoul(val, &end);
+            if (val.front() != '-' && end == val.size() && CrossfeedDSP::valid_sample_rate(static_cast<float>(value))) state.sample_rate = static_cast<uint32_t>(value);
+        } catch (...) {}
     }
 
     val = extract_val("buffer_frames");
     if (!val.empty()) {
-        try { state.buffer_frames = std::stoul(val); } catch (...) {}
+        try {
+            size_t end = 0;
+            const unsigned long value = std::stoul(val, &end);
+            if (val.front() != '-' && end == val.size() && value >= 1 && value <= 65536) state.buffer_frames = static_cast<uint32_t>(value);
+        } catch (...) {}
     }
 
     return true;

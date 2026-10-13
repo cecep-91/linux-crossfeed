@@ -2,7 +2,7 @@
 # scripts/package.sh — Builds .xbps, .deb, and .rpm packages for crossfeed
 set -euo pipefail
 
-VERSION="${VERSION:-2.3.1}"
+VERSION="${VERSION:-2.4.0}"
 PKG_RELEASE="1"
 PKG_NAME="crossfeed"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

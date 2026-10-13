@@ -1,211 +1,162 @@
 #include "dsp.hpp"
+#include "audio_math.hpp"
 #include <algorithm>
 #include <cstring>
 
 namespace crossfeed {
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+constexpr double PI = 3.14159265358979323846;
 
 CrossfeedDSP::CrossfeedDSP() {
-    recompute_coeffs(param_buffers_[0]);
-    param_buffers_[1] = param_buffers_[0];
-    active_read_idx_.store(0, std::memory_order_relaxed);
-    reset_requested_.store(false, std::memory_order_relaxed);
+    recompute_coeffs(control_params_);
+    for (auto& p : param_buffers_) p = control_params_;
+    pending_params_ = control_params_;
 }
 
-void CrossfeedDSP::set_params(float sample_rate, float level_db, float freq_hz, bool enabled) {
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    size_t current_idx = active_read_idx_.load(std::memory_order_relaxed);
-    size_t next_idx = 1 - current_idx;
-
-    param_buffers_[next_idx] = param_buffers_[current_idx];
-    param_buffers_[next_idx].sample_rate = std::max(8000.0f, sample_rate);
-    param_buffers_[next_idx].level_db = std::clamp(level_db, MIN_LEVEL_DB, MAX_LEVEL_DB);
-    param_buffers_[next_idx].freq_hz = std::clamp(freq_hz, MIN_FREQ_HZ, MAX_FREQ_HZ);
-    param_buffers_[next_idx].enabled = enabled;
-    recompute_coeffs(param_buffers_[next_idx]);
-
-    active_read_idx_.store(next_idx, std::memory_order_release);
+bool CrossfeedDSP::valid_sample_rate(float rate) noexcept {
+    return std::isfinite(rate) && rate >= MIN_SAMPLE_RATE && rate <= MAX_SAMPLE_RATE;
 }
 
-void CrossfeedDSP::set_all_params(float sample_rate, float level_db, float freq_hz,
-                                 float delay_us, float phase_apf_hz, float center_trim_db,
-                                 float shadow_hz, bool advanced_effects, bool enabled) {
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    size_t current_idx = active_read_idx_.load(std::memory_order_relaxed);
-    size_t next_idx = 1 - current_idx;
-
-    param_buffers_[next_idx] = param_buffers_[current_idx];
-    param_buffers_[next_idx].sample_rate = std::max(8000.0f, sample_rate);
-    param_buffers_[next_idx].level_db = std::clamp(level_db, MIN_LEVEL_DB, MAX_LEVEL_DB);
-    param_buffers_[next_idx].freq_hz = std::clamp(freq_hz, MIN_FREQ_HZ, MAX_FREQ_HZ);
-    param_buffers_[next_idx].delay_us = std::clamp(delay_us, MIN_DELAY_US, MAX_DELAY_US);
-    param_buffers_[next_idx].phase_apf_hz = std::clamp(phase_apf_hz, MIN_PHASE_APF_HZ, MAX_PHASE_APF_HZ);
-    param_buffers_[next_idx].center_trim_db = std::clamp(center_trim_db, MIN_CENTER_TRIM_DB, MAX_CENTER_TRIM_DB);
-    param_buffers_[next_idx].shadow_hz = std::clamp(shadow_hz, MIN_SHADOW_HZ, MAX_SHADOW_HZ);
-    param_buffers_[next_idx].advanced_effects = advanced_effects;
-    param_buffers_[next_idx].enabled = enabled;
-    recompute_coeffs(param_buffers_[next_idx]);
-
-    active_read_idx_.store(next_idx, std::memory_order_release);
+bool CrossfeedDSP::normalize_params(FilterParams& p) {
+    if (!valid_sample_rate(p.sample_rate) || !std::isfinite(p.level_db) ||
+        !std::isfinite(p.freq_hz) || !std::isfinite(p.delay_us) ||
+        !std::isfinite(p.phase_apf_hz) || !std::isfinite(p.center_trim_db) ||
+        !std::isfinite(p.shadow_hz)) return false;
+    // Keep distance from the degenerate Nyquist boundary, including at 8 kHz.
+    const float ceiling = p.sample_rate * 0.45f;
+    p.level_db = std::clamp(p.level_db, MIN_LEVEL_DB, MAX_LEVEL_DB);
+    p.freq_hz = std::clamp(p.freq_hz, MIN_FREQ_HZ, std::min(MAX_FREQ_HZ, ceiling));
+    p.delay_us = std::clamp(p.delay_us, MIN_DELAY_US, MAX_DELAY_US);
+    p.phase_apf_hz = std::clamp(p.phase_apf_hz, MIN_PHASE_APF_HZ, std::min(MAX_PHASE_APF_HZ, ceiling));
+    p.center_trim_db = std::clamp(p.center_trim_db, MIN_CENTER_TRIM_DB, MAX_CENTER_TRIM_DB);
+    p.shadow_hz = std::clamp(p.shadow_hz, MIN_SHADOW_HZ, std::min(MAX_SHADOW_HZ, ceiling));
+    return true;
 }
 
-void CrossfeedDSP::set_advanced_effects(bool enabled) {
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    size_t current_idx = active_read_idx_.load(std::memory_order_relaxed);
-    size_t next_idx = 1 - current_idx;
-
-    param_buffers_[next_idx] = param_buffers_[current_idx];
-    param_buffers_[next_idx].advanced_effects = enabled;
-
-    active_read_idx_.store(next_idx, std::memory_order_release);
+bool CrossfeedDSP::publish_locked(FilterParams p) {
+    const uint32_t requested = requested_rate_.load(std::memory_order_acquire);
+    if (requested != 0) p.sample_rate = static_cast<float>(requested);
+    if (!normalize_params(p)) return false;
+    p.generation = control_params_.generation + 1;
+    recompute_coeffs(p);
+    control_params_ = p;
+    param_buffers_[write_idx_] = p;
+    // Acquire recovers a slot released by the reader; release publishes ours.
+    write_idx_ = exchange_idx_.exchange(write_idx_ | DIRTY, std::memory_order_acq_rel) & ~DIRTY;
+    return true;
 }
 
-bool CrossfeedDSP::get_advanced_effects() const {
+bool CrossfeedDSP::set_params(float sample_rate, float level_db, float freq_hz, bool enabled) {
+    if (!valid_sample_rate(sample_rate)) return false;
     std::lock_guard<std::mutex> lock(write_mutex_);
-    return param_buffers_[active_read_idx_.load(std::memory_order_relaxed)].advanced_effects;
+    auto p = control_params_;
+    p.sample_rate = sample_rate;
+    p.level_db = level_db;
+    p.freq_hz = freq_hz;
+    p.enabled = enabled;
+    return publish_locked(p);
 }
 
-void CrossfeedDSP::set_level_db(float level_db) {
+bool CrossfeedDSP::set_all_params(float sample_rate, float level_db, float freq_hz,
+                                  float delay_us, float phase_apf_hz, float center_trim_db,
+                                  float shadow_hz, bool advanced_effects, bool enabled) {
+    if (!valid_sample_rate(sample_rate)) return false;
     std::lock_guard<std::mutex> lock(write_mutex_);
-    size_t current_idx = active_read_idx_.load(std::memory_order_relaxed);
-    size_t next_idx = 1 - current_idx;
-
-    param_buffers_[next_idx] = param_buffers_[current_idx];
-    param_buffers_[next_idx].level_db = std::clamp(level_db, MIN_LEVEL_DB, MAX_LEVEL_DB);
-    recompute_coeffs(param_buffers_[next_idx]);
-
-    active_read_idx_.store(next_idx, std::memory_order_release);
+    auto p = control_params_;
+    p.sample_rate = sample_rate;
+    p.level_db = level_db;
+    p.freq_hz = freq_hz;
+    p.delay_us = delay_us;
+    p.phase_apf_hz = phase_apf_hz;
+    p.center_trim_db = center_trim_db;
+    p.shadow_hz = shadow_hz;
+    p.advanced_effects = advanced_effects;
+    p.enabled = enabled;
+    return publish_locked(p);
 }
 
-void CrossfeedDSP::set_freq_hz(float freq_hz) {
+bool CrossfeedDSP::set_numeric(float FilterParams::*field, float value) {
     std::lock_guard<std::mutex> lock(write_mutex_);
-    size_t current_idx = active_read_idx_.load(std::memory_order_relaxed);
-    size_t next_idx = 1 - current_idx;
-
-    param_buffers_[next_idx] = param_buffers_[current_idx];
-    param_buffers_[next_idx].freq_hz = std::clamp(freq_hz, MIN_FREQ_HZ, MAX_FREQ_HZ);
-    recompute_coeffs(param_buffers_[next_idx]);
-
-    active_read_idx_.store(next_idx, std::memory_order_release);
+    auto p = control_params_;
+    p.*field = value;
+    return publish_locked(p);
 }
 
-void CrossfeedDSP::set_delay_us(float delay_us) {
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    size_t current_idx = active_read_idx_.load(std::memory_order_relaxed);
-    size_t next_idx = 1 - current_idx;
-
-    param_buffers_[next_idx] = param_buffers_[current_idx];
-    param_buffers_[next_idx].delay_us = std::clamp(delay_us, MIN_DELAY_US, MAX_DELAY_US);
-    recompute_coeffs(param_buffers_[next_idx]);
-
-    active_read_idx_.store(next_idx, std::memory_order_release);
+bool CrossfeedDSP::set_level_db(float value) {
+    return set_numeric(&FilterParams::level_db, value);
 }
 
-void CrossfeedDSP::set_phase_apf_hz(float phase_apf_hz) {
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    size_t current_idx = active_read_idx_.load(std::memory_order_relaxed);
-    size_t next_idx = 1 - current_idx;
-
-    param_buffers_[next_idx] = param_buffers_[current_idx];
-    param_buffers_[next_idx].phase_apf_hz = std::clamp(phase_apf_hz, MIN_PHASE_APF_HZ, MAX_PHASE_APF_HZ);
-    recompute_coeffs(param_buffers_[next_idx]);
-
-    active_read_idx_.store(next_idx, std::memory_order_release);
+bool CrossfeedDSP::set_freq_hz(float value) {
+    return set_numeric(&FilterParams::freq_hz, value);
 }
 
-void CrossfeedDSP::set_center_trim_db(float center_trim_db) {
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    size_t current_idx = active_read_idx_.load(std::memory_order_relaxed);
-    size_t next_idx = 1 - current_idx;
-
-    param_buffers_[next_idx] = param_buffers_[current_idx];
-    param_buffers_[next_idx].center_trim_db = std::clamp(center_trim_db, MIN_CENTER_TRIM_DB, MAX_CENTER_TRIM_DB);
-    recompute_coeffs(param_buffers_[next_idx]);
-
-    active_read_idx_.store(next_idx, std::memory_order_release);
+bool CrossfeedDSP::set_delay_us(float value) {
+    return set_numeric(&FilterParams::delay_us, value);
 }
 
-void CrossfeedDSP::set_shadow_hz(float shadow_hz) {
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    size_t current_idx = active_read_idx_.load(std::memory_order_relaxed);
-    size_t next_idx = 1 - current_idx;
-
-    param_buffers_[next_idx] = param_buffers_[current_idx];
-    param_buffers_[next_idx].shadow_hz = std::clamp(shadow_hz, MIN_SHADOW_HZ, MAX_SHADOW_HZ);
-    recompute_coeffs(param_buffers_[next_idx]);
-
-    active_read_idx_.store(next_idx, std::memory_order_release);
+bool CrossfeedDSP::set_phase_apf_hz(float value) {
+    return set_numeric(&FilterParams::phase_apf_hz, value);
 }
 
-void CrossfeedDSP::set_enabled(bool enabled) {
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    size_t current_idx = active_read_idx_.load(std::memory_order_relaxed);
-    size_t next_idx = 1 - current_idx;
-
-    param_buffers_[next_idx] = param_buffers_[current_idx];
-    param_buffers_[next_idx].enabled = enabled;
-
-    active_read_idx_.store(next_idx, std::memory_order_release);
+bool CrossfeedDSP::set_center_trim_db(float value) {
+    return set_numeric(&FilterParams::center_trim_db, value);
 }
 
-bool CrossfeedDSP::is_enabled() const {
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    return param_buffers_[active_read_idx_.load(std::memory_order_relaxed)].enabled;
+bool CrossfeedDSP::set_shadow_hz(float value) {
+    return set_numeric(&FilterParams::shadow_hz, value);
 }
 
-float CrossfeedDSP::get_level_db() const {
+void CrossfeedDSP::set_enabled(bool value) {
     std::lock_guard<std::mutex> lock(write_mutex_);
-    return param_buffers_[active_read_idx_.load(std::memory_order_relaxed)].level_db;
+    auto p = control_params_;
+    p.enabled = value;
+    publish_locked(p);
 }
 
-float CrossfeedDSP::get_freq_hz() const {
+void CrossfeedDSP::set_advanced_effects(bool value) {
     std::lock_guard<std::mutex> lock(write_mutex_);
-    return param_buffers_[active_read_idx_.load(std::memory_order_relaxed)].freq_hz;
+    auto p = control_params_;
+    p.advanced_effects = value;
+    publish_locked(p);
 }
 
-float CrossfeedDSP::get_delay_us() const {
+FilterParams CrossfeedDSP::get_params() const {
     std::lock_guard<std::mutex> lock(write_mutex_);
-    return param_buffers_[active_read_idx_.load(std::memory_order_relaxed)].delay_us;
+    return control_params_;
 }
 
-float CrossfeedDSP::get_phase_apf_hz() const {
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    return param_buffers_[active_read_idx_.load(std::memory_order_relaxed)].phase_apf_hz;
+float CrossfeedDSP::get_level_db() const { return get_params().level_db; }
+
+float CrossfeedDSP::get_freq_hz() const { return get_params().freq_hz; }
+
+float CrossfeedDSP::get_delay_us() const { return get_params().delay_us; }
+
+float CrossfeedDSP::get_phase_apf_hz() const { return get_params().phase_apf_hz; }
+
+float CrossfeedDSP::get_center_trim_db() const { return get_params().center_trim_db; }
+
+float CrossfeedDSP::get_shadow_hz() const { return get_params().shadow_hz; }
+
+float CrossfeedDSP::get_sample_rate() const { return get_params().sample_rate; }
+
+bool CrossfeedDSP::get_advanced_effects() const { return get_params().advanced_effects; }
+
+bool CrossfeedDSP::is_enabled() const { return get_params().enabled; }
+
+void CrossfeedDSP::request_sample_rate(uint32_t rate) noexcept {
+    requested_rate_.store(rate, std::memory_order_release);
 }
 
-float CrossfeedDSP::get_center_trim_db() const {
+bool CrossfeedDSP::service_sample_rate() {
     std::lock_guard<std::mutex> lock(write_mutex_);
-    return param_buffers_[active_read_idx_.load(std::memory_order_relaxed)].center_trim_db;
-}
-
-float CrossfeedDSP::get_shadow_hz() const {
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    return param_buffers_[active_read_idx_.load(std::memory_order_relaxed)].shadow_hz;
-}
-
-float CrossfeedDSP::get_sample_rate() const {
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    return param_buffers_[active_read_idx_.load(std::memory_order_relaxed)].sample_rate;
+    const auto rate = requested_rate_.load(std::memory_order_acquire);
+    if (rate == 0 || static_cast<float>(rate) == control_params_.sample_rate) return true;
+    if (!valid_sample_rate(static_cast<float>(rate))) return false;
+    return publish_locked(control_params_);
 }
 
 void CrossfeedDSP::reset() {
     reset_requested_.store(true, std::memory_order_release);
-}
-
-void CrossfeedDSP::reset_internal() noexcept {
-    dir_l_.reset();
-    dir_r_.reset();
-    cross_l_.reset();
-    cross_r_.reset();
-    apf_l_.reset();
-    apf_r_.reset();
-    shadow_l_.reset();
-    shadow_r_.reset();
-    delay_l_.reset();
-    delay_r_.reset();
 }
 
 void CrossfeedDSP::recompute_coeffs(FilterParams& params) {
@@ -213,7 +164,7 @@ void CrossfeedDSP::recompute_coeffs(FilterParams& params) {
     params.trim_linear = std::pow(10.0f, params.center_trim_db / 20.0f);
     params.delay_samples = (params.delay_us / 1000000.0f) * params.sample_rate;
 
-    float dir_gain_db = FULL_DIR_GAIN * (params.gain2 / FULL_GAIN2);
+    double dir_gain_db = FULL_DIR_GAIN * (params.gain2 / FULL_GAIN2);
 
     compute_lowshelf(params.dir_coeffs, params.sample_rate, params.freq_hz, 0.7071f, dir_gain_db);
     compute_lowpass(params.cross_coeffs, params.sample_rate, params.freq_hz, 0.5f);
@@ -222,19 +173,24 @@ void CrossfeedDSP::recompute_coeffs(FilterParams& params) {
 }
 
 void CrossfeedDSP::compute_lowshelf(BiquadCoeffs& out, float sample_rate, float freq, float q, float gain_db) {
-    float A = std::pow(10.0f, gain_db / 40.0f);
-    float w0 = 2.0f * static_cast<float>(M_PI) * freq / sample_rate;
-    float cos_w = std::cos(w0);
-    float sin_w = std::sin(w0);
-    float alpha = sin_w / (2.0f * q);
-    float sqrtA = std::sqrt(A);
+    if (!valid_sample_rate(sample_rate) || !std::isfinite(freq) || freq <= 0.0f ||
+        freq >= sample_rate * 0.5f || !std::isfinite(q) || q <= 0.0f || !std::isfinite(gain_db)) {
+        out = BiquadCoeffs{};
+        return;
+    }
+    double A = std::pow(10.0, static_cast<double>(gain_db) / 40.0);
+    double w0 = 2.0f * PI * freq / sample_rate;
+    double cos_w = std::cos(w0);
+    double sin_w = std::sin(w0);
+    double alpha = sin_w / (2.0f * q);
+    double sqrtA = std::sqrt(A);
 
-    float a0 = (A + 1.0f) + (A - 1.0f) * cos_w + 2.0f * sqrtA * alpha;
+    double a0 = (A + 1.0f) + (A - 1.0f) * cos_w + 2.0f * sqrtA * alpha;
     if (std::abs(a0) < 1e-9f) {
         out = BiquadCoeffs{};
         return;
     }
-    float inv_a0 = 1.0f / a0;
+    double inv_a0 = 1.0f / a0;
 
     out.b0 = (A * ((A + 1.0f) - (A - 1.0f) * cos_w + 2.0f * sqrtA * alpha)) * inv_a0;
     out.b1 = (2.0f * A * ((A - 1.0f) - (A + 1.0f) * cos_w)) * inv_a0;
@@ -244,17 +200,22 @@ void CrossfeedDSP::compute_lowshelf(BiquadCoeffs& out, float sample_rate, float 
 }
 
 void CrossfeedDSP::compute_lowpass(BiquadCoeffs& out, float sample_rate, float freq, float q) {
-    float w0 = 2.0f * static_cast<float>(M_PI) * freq / sample_rate;
-    float cos_w = std::cos(w0);
-    float sin_w = std::sin(w0);
-    float alpha = sin_w / (2.0f * q);
+    if (!valid_sample_rate(sample_rate) || !std::isfinite(freq) || freq <= 0.0f ||
+        freq >= sample_rate * 0.5f || !std::isfinite(q) || q <= 0.0f) {
+        out = BiquadCoeffs{};
+        return;
+    }
+    double w0 = 2.0f * PI * freq / sample_rate;
+    double cos_w = std::cos(w0);
+    double sin_w = std::sin(w0);
+    double alpha = sin_w / (2.0f * q);
 
-    float a0 = 1.0f + alpha;
+    double a0 = 1.0f + alpha;
     if (std::abs(a0) < 1e-9f) {
         out = BiquadCoeffs{};
         return;
     }
-    float inv_a0 = 1.0f / a0;
+    double inv_a0 = 1.0f / a0;
 
     out.b0 = ((1.0f - cos_w) * 0.5f) * inv_a0;
     out.b1 = (1.0f - cos_w) * inv_a0;
@@ -264,133 +225,138 @@ void CrossfeedDSP::compute_lowpass(BiquadCoeffs& out, float sample_rate, float f
 }
 
 void CrossfeedDSP::compute_allpass(BiquadCoeffs& out, float sample_rate, float freq, float q) {
-    float w0 = 2.0f * static_cast<float>(M_PI) * freq / sample_rate;
-    float cos_w = std::cos(w0);
-    float sin_w = std::sin(w0);
-    float alpha = sin_w / (2.0f * q);
+    if (!valid_sample_rate(sample_rate) || !std::isfinite(freq) || freq <= 0.0f ||
+        freq >= sample_rate * 0.5f || !std::isfinite(q) || q <= 0.0f) {
+        out = BiquadCoeffs{};
+        return;
+    }
+    double w0 = 2.0f * PI * freq / sample_rate;
+    double cos_w = std::cos(w0);
+    double sin_w = std::sin(w0);
+    double alpha = sin_w / (2.0f * q);
 
-    float a0 = 1.0f + alpha;
+    double a0 = 1.0f + alpha;
     if (std::abs(a0) < 1e-9f) {
         out = BiquadCoeffs{};
         return;
     }
-    float inv_a0 = 1.0f / a0;
+    double inv_a0 = 1.0f / a0;
 
     out.b0 = (1.0f - alpha) * inv_a0;
     out.b1 = (-2.0f * cos_w) * inv_a0;
-    out.b2 = (1.0f + alpha) * inv_a0;
+    out.b2 = 1.0f;
     out.a1 = (-2.0f * cos_w) * inv_a0;
     out.a2 = (1.0f - alpha) * inv_a0;
 }
 
+
+void CrossfeedDSP::Engine::reset(const FilterParams& p) noexcept {
+    dir_l.reset(); dir_r.reset(); cross_l.reset(); cross_r.reset();
+    apf_l.reset(); apf_r.reset(); shadow_l.reset(); shadow_r.reset();
+    delay_l.reset(); delay_r.reset();
+    params = p;
+    delay_samples = p.delay_samples;
+    delay_step = 0.0f;
+    delay_remaining = 0;
+}
+
+void CrossfeedDSP::Engine::retarget(const FilterParams& p) noexcept {
+    params = p;
+    delay_remaining = std::max(1u, static_cast<unsigned>(p.sample_rate * TRANSITION_SECONDS));
+    delay_step = (p.delay_samples - delay_samples) / static_cast<float>(delay_remaining);
+}
+
+void CrossfeedDSP::Engine::process(float l, float r, float& out_l, float& out_r) noexcept {
+    if (delay_remaining > 0) {
+        delay_samples += delay_step;
+        if (--delay_remaining == 0) delay_samples = params.delay_samples;
+    }
+    const float dl = dir_l.process(l, params.dir_coeffs);
+    const float dr = dir_r.process(r, params.dir_coeffs);
+    const float cl = cross_l.process(l, params.cross_coeffs);
+    const float cr = cross_r.process(r, params.cross_coeffs);
+    // Keep histories warm even in pure/bypass mode, so enabling a stage never
+    // replays stale samples from the last time it was used.
+    delay_l.write(apf_l.process(shadow_l.process(cl, params.shadow_coeffs), params.apf_coeffs));
+    delay_r.write(apf_r.process(shadow_r.process(cr, params.shadow_coeffs), params.apf_coeffs));
+    if (!params.enabled) {
+        out_l = l; out_r = r;
+    } else if (params.advanced_effects) {
+        out_l = (dl + params.gain2 * delay_r.read(delay_samples)) * params.trim_linear;
+        out_r = (dr + params.gain2 * delay_l.read(delay_samples)) * params.trim_linear;
+    } else {
+        out_l = dl + params.gain2 * cr;
+        out_r = dr + params.gain2 * cl;
+    }
+}
+
+bool CrossfeedDSP::begin_block() noexcept {
+    if (exchange_idx_.load(std::memory_order_acquire) & DIRTY) {
+        read_idx_ = exchange_idx_.exchange(read_idx_, std::memory_order_acq_rel) & ~DIRTY;
+        pending_params_ = param_buffers_[read_idx_];
+    }
+    const bool reset = reset_requested_.exchange(false, std::memory_order_acquire);
+    const uint32_t rate = requested_rate_.load(std::memory_order_acquire);
+    if (rate != 0 && pending_params_.sample_rate != static_cast<float>(rate)) {
+        // Do not use coefficients or delay histories belonging to another rate.
+        awaiting_rate_ = true;
+        started_ = false;
+        fade_remaining_ = 0;
+        return false;
+    }
+    auto& current = engines_[active_engine_];
+    if (!started_ || reset || current.params.sample_rate != pending_params_.sample_rate) {
+        current.reset(pending_params_);
+        started_ = true;
+        fade_remaining_ = 0;
+        if (awaiting_rate_ && !reset) {
+            engines_[1 - active_engine_] = current;
+            current.params.enabled = false;
+            fade_length_ = std::max(1u, static_cast<unsigned>(pending_params_.sample_rate * TRANSITION_SECONDS));
+            fade_remaining_ = fade_length_;
+        }
+        awaiting_rate_ = false;
+    } else if (fade_remaining_ == 0 && current.params.generation != pending_params_.generation) {
+        auto& next = engines_[1 - active_engine_];
+        next = current;
+        next.retarget(pending_params_);
+        fade_length_ = std::max(1u, static_cast<unsigned>(pending_params_.sample_rate * TRANSITION_SECONDS));
+        fade_remaining_ = fade_length_;
+    }
+    return true;
+}
+
+void CrossfeedDSP::process_sample(float l, float r, float& out_l, float& out_r) noexcept {
+    engines_[active_engine_].process(l, r, out_l, out_r);
+    if (fade_remaining_ > 0) {
+        float next_l, next_r;
+        engines_[1 - active_engine_].process(l, r, next_l, next_r);
+        const float mix = 1.0f - static_cast<float>(fade_remaining_ - 1) / static_cast<float>(fade_length_);
+        out_l += mix * (next_l - out_l);
+        out_r += mix * (next_r - out_r);
+        if (--fade_remaining_ == 0) active_engine_ = 1 - active_engine_;
+    }
+}
+
 void CrossfeedDSP::process_interleaved(const float* in, float* out, size_t frames) noexcept {
-    if (reset_requested_.exchange(false, std::memory_order_relaxed)) {
-        reset_internal();
-    }
-
-    const FilterParams& p = param_buffers_[active_read_idx_.load(std::memory_order_acquire)];
-
-    if (!p.enabled) {
-        if (in != out) {
-            std::memcpy(out, in, frames * 2 * sizeof(float));
-        }
-        return;
-    }
-
-    const float gain2 = p.gain2;
-    const float trim = p.trim_linear;
-    const float delay_s = p.delay_samples;
-    const BiquadCoeffs& dir_c = p.dir_coeffs;
-    const BiquadCoeffs& cross_c = p.cross_coeffs;
-    const BiquadCoeffs& apf_c = p.apf_coeffs;
-    const BiquadCoeffs& shadow_c = p.shadow_coeffs;
-
+    if (frames == 0) return;
+    ScopedDenormals denormals;
+    const bool ready = begin_block();
     for (size_t i = 0; i < frames; ++i) {
-        float in_l = in[2 * i];
-        float in_r = in[2 * i + 1];
-
-        float d_l = dir_l_.process(in_l, dir_c);
-        float d_r = dir_r_.process(in_r, dir_c);
-
-        float c_l = cross_l_.process(in_l, cross_c);
-        float c_r = cross_r_.process(in_r, cross_c);
-
-        if (p.advanced_effects) {
-            c_l = shadow_l_.process(c_l, shadow_c);
-            c_r = shadow_r_.process(c_r, shadow_c);
-
-            c_l = apf_l_.process(c_l, apf_c);
-            c_r = apf_r_.process(c_r, apf_c);
-
-            delay_l_.write(c_l);
-            delay_r_.write(c_r);
-
-            float c_del_l = delay_l_.read(delay_s);
-            float c_del_r = delay_r_.read(delay_s);
-
-            out[2 * i]     = (d_l + gain2 * c_del_r) * trim;
-            out[2 * i + 1] = (d_r + gain2 * c_del_l) * trim;
-        } else {
-            out[2 * i]     = d_l + gain2 * c_r;
-            out[2 * i + 1] = d_r + gain2 * c_l;
-        }
+        const float l = in[2 * i], r = in[2 * i + 1];
+        if (ready) process_sample(l, r, out[2 * i], out[2 * i + 1]);
+        else { out[2 * i] = l; out[2 * i + 1] = r; }
     }
 }
 
 void CrossfeedDSP::process_planar(const float* in_l, const float* in_r, float* out_l, float* out_r, size_t frames) noexcept {
-    if (reset_requested_.exchange(false, std::memory_order_relaxed)) {
-        reset_internal();
-    }
-
-    const FilterParams& p = param_buffers_[active_read_idx_.load(std::memory_order_acquire)];
-
-    if (!p.enabled) {
-        if (in_l != out_l) {
-            std::memcpy(out_l, in_l, frames * sizeof(float));
-        }
-        if (in_r != out_r) {
-            std::memcpy(out_r, in_r, frames * sizeof(float));
-        }
-        return;
-    }
-
-    const float gain2 = p.gain2;
-    const float trim = p.trim_linear;
-    const float delay_s = p.delay_samples;
-    const BiquadCoeffs& dir_c = p.dir_coeffs;
-    const BiquadCoeffs& cross_c = p.cross_coeffs;
-    const BiquadCoeffs& apf_c = p.apf_coeffs;
-    const BiquadCoeffs& shadow_c = p.shadow_coeffs;
-
+    if (frames == 0) return;
+    ScopedDenormals denormals;
+    const bool ready = begin_block();
     for (size_t i = 0; i < frames; ++i) {
-        float l = in_l[i];
-        float r = in_r[i];
-
-        float d_l = dir_l_.process(l, dir_c);
-        float d_r = dir_r_.process(r, dir_c);
-
-        float c_l = cross_l_.process(l, cross_c);
-        float c_r = cross_r_.process(r, cross_c);
-
-        if (p.advanced_effects) {
-            c_l = shadow_l_.process(c_l, shadow_c);
-            c_r = shadow_r_.process(c_r, shadow_c);
-
-            c_l = apf_l_.process(c_l, apf_c);
-            c_r = apf_r_.process(c_r, apf_c);
-
-            delay_l_.write(c_l);
-            delay_r_.write(c_r);
-
-            float c_del_l = delay_l_.read(delay_s);
-            float c_del_r = delay_r_.read(delay_s);
-
-            out_l[i] = (d_l + gain2 * c_del_r) * trim;
-            out_r[i] = (d_r + gain2 * c_del_l) * trim;
-        } else {
-            out_l[i] = d_l + gain2 * c_r;
-            out_r[i] = d_r + gain2 * c_l;
-        }
+        const float l = in_l[i], r = in_r[i];
+        if (ready) process_sample(l, r, out_l[i], out_r[i]);
+        else { out_l[i] = l; out_r[i] = r; }
     }
 }
 

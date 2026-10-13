@@ -5,6 +5,7 @@
 #include <mutex>
 #include <atomic>
 #include <algorithm>
+#include <cstdint>
 
 namespace crossfeed {
 
@@ -16,6 +17,9 @@ constexpr float MIN_FREQ_HZ = 200.0f;
 constexpr float MAX_FREQ_HZ = 2000.0f;
 constexpr float FULL_GAIN2 = 0.316f;
 constexpr float FULL_DIR_GAIN = -1.5f;
+constexpr float MIN_SAMPLE_RATE = 8000.0f;
+constexpr float MAX_SAMPLE_RATE = 192000.0f;
+constexpr float TRANSITION_SECONDS = 0.020f;
 
 // Extended / Advanced Crossfeed Constants
 constexpr float DEFAULT_DELAY_US = 280.0f;
@@ -76,6 +80,7 @@ public:
     }
 
     inline float read(float delay_samples) const noexcept {
+        if (!std::isfinite(delay_samples)) return 0.0f;
         if (delay_samples <= 0.001f) {
             size_t idx = (write_idx_ - 1) & (BUFFER_SIZE - 1);
             return buffer_[idx];
@@ -100,6 +105,7 @@ private:
 };
 
 struct FilterParams {
+    uint64_t generation = 0;
     float sample_rate = 48000.0f;
     float level_db = DEFAULT_LEVEL_DB;
     float freq_hz = DEFAULT_FREQ_HZ;
@@ -124,17 +130,17 @@ class CrossfeedDSP {
 public:
     CrossfeedDSP();
 
-    void set_params(float sample_rate, float level_db, float freq_hz, bool enabled);
-    void set_all_params(float sample_rate, float level_db, float freq_hz,
+    bool set_params(float sample_rate, float level_db, float freq_hz, bool enabled);
+    bool set_all_params(float sample_rate, float level_db, float freq_hz,
                         float delay_us, float phase_apf_hz, float center_trim_db,
                         float shadow_hz, bool advanced_effects, bool enabled);
 
-    void set_level_db(float level_db);
-    void set_freq_hz(float freq_hz);
-    void set_delay_us(float delay_us);
-    void set_phase_apf_hz(float phase_apf_hz);
-    void set_center_trim_db(float center_trim_db);
-    void set_shadow_hz(float shadow_hz);
+    bool set_level_db(float level_db);
+    bool set_freq_hz(float freq_hz);
+    bool set_delay_us(float delay_us);
+    bool set_phase_apf_hz(float phase_apf_hz);
+    bool set_center_trim_db(float center_trim_db);
+    bool set_shadow_hz(float shadow_hz);
     void set_advanced_effects(bool enabled);
     void set_enabled(bool enabled);
 
@@ -147,6 +153,13 @@ public:
     float get_center_trim_db() const;
     float get_shadow_hz() const;
     float get_sample_rate() const;
+    FilterParams get_params() const; // Non-RT, coherent control snapshot.
+
+    // The callback only posts a rate. A non-RT timer services it and prepares
+    // coefficients. Until a matching snapshot arrives, audio passes through.
+    void request_sample_rate(uint32_t rate) noexcept;
+    bool service_sample_rate();
+    static bool valid_sample_rate(float rate) noexcept;
 
     void reset();
 
@@ -161,26 +174,46 @@ public:
     static void compute_allpass(BiquadCoeffs& out, float sample_rate, float freq, float q);
 
 private:
+    static bool normalize_params(FilterParams& params);
     static void recompute_coeffs(FilterParams& params);
-    void reset_internal() noexcept;
+    bool publish_locked(FilterParams params);
+    bool set_numeric(float FilterParams::*field, float value);
+    bool begin_block() noexcept;
+    void process_sample(float l, float r, float& out_l, float& out_r) noexcept;
 
-    FilterParams param_buffers_[2];
-    std::atomic<size_t> active_read_idx_{0};
-    mutable std::mutex write_mutex_; // Only writers lock write_mutex_, audio thread NEVER locks!
+    // Three owners: writer, atomic exchange slot, reader. Writers serialize;
+    // exactly one audio thread may call either process method at a time.
+    static constexpr unsigned DIRTY = 4;
+    FilterParams param_buffers_[3];
+    FilterParams control_params_;
+    unsigned write_idx_ = 0; // Protected by write_mutex_.
+    unsigned read_idx_ = 1;  // Audio thread only.
+    std::atomic<unsigned> exchange_idx_{2};
+    mutable std::mutex write_mutex_;
     std::atomic<bool> reset_requested_{false};
+    std::atomic<uint32_t> requested_rate_{0};
+    static_assert(std::atomic<unsigned>::is_always_lock_free, "RT indices must be lock-free");
+    static_assert(std::atomic<uint32_t>::is_always_lock_free, "RT rates must be lock-free");
+    static_assert(std::atomic<bool>::is_always_lock_free, "RT reset flag must be lock-free");
 
-    // DSP state (accessed only by audio thread)
-    Biquad dir_l_;
-    Biquad dir_r_;
-    Biquad cross_l_;
-    Biquad cross_r_;
-    Biquad apf_l_;
-    Biquad apf_r_;
-    Biquad shadow_l_;
-    Biquad shadow_r_;
-
-    DelayLine delay_l_;
-    DelayLine delay_r_;
+    struct Engine {
+        FilterParams params;
+        Biquad dir_l, dir_r, cross_l, cross_r, apf_l, apf_r, shadow_l, shadow_r;
+        DelayLine delay_l, delay_r;
+        float delay_samples = 0.0f;
+        float delay_step = 0.0f;
+        unsigned delay_remaining = 0;
+        void reset(const FilterParams& p) noexcept;
+        void retarget(const FilterParams& p) noexcept;
+        void process(float l, float r, float& out_l, float& out_r) noexcept;
+    };
+    Engine engines_[2];
+    FilterParams pending_params_;
+    unsigned active_engine_ = 0;
+    unsigned fade_remaining_ = 0;
+    unsigned fade_length_ = 1;
+    bool started_ = false;
+    bool awaiting_rate_ = false;
 };
 
 } // namespace crossfeed

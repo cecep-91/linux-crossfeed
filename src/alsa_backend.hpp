@@ -26,6 +26,7 @@ public:
 
 private:
     bool set_hw_params(snd_pcm_t* pcm);
+    void cleanup();
 
     CrossfeedDSP* dsp_ = nullptr;
     std::string in_device_ = "default";
@@ -37,6 +38,7 @@ private:
     snd_pcm_t* playback_handle_ = nullptr;
 
     std::atomic<bool> running_{false};
+    std::atomic<bool> stop_requested_{false};
 };
 
 } // namespace crossfeed

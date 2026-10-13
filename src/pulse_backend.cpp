@@ -15,7 +15,7 @@ static inline void run_sys_cmd(const std::string& cmd) {
 PulseBackend::PulseBackend() = default;
 
 PulseBackend::~PulseBackend() {
-    stop();
+    cleanup();
 }
 
 struct ContextQuery {
@@ -136,7 +136,7 @@ bool PulseBackend::load_null_sink() {
         if (fgets(buf, sizeof(buf), fp)) {
             try {
                 null_sink_module_index_ = std::stoul(buf);
-                own_module_ = true;
+                own_module_ = false;
                 pclose(fp);
                 return true;
             } catch (...) {}
@@ -171,6 +171,7 @@ bool PulseBackend::load_null_sink() {
 }
 
 void PulseBackend::unload_null_sink() {
+    if (null_sink_module_index_ == PA_INVALID_INDEX) return;
     auto is_self = [](const std::string& name) {
         return name == "crossfeed" || name == "crossfeed_sink" || name == "Crossfeed";
     };
@@ -186,15 +187,11 @@ void PulseBackend::unload_null_sink() {
         run_sys_cmd(def_cmd);
     }
 
-    if (null_sink_module_index_ != PA_INVALID_INDEX) {
-        std::string cmd = "pactl unload-module " + std::to_string(null_sink_module_index_) + " >/dev/null 2>&1";
-        run_sys_cmd(cmd);
-        null_sink_module_index_ = PA_INVALID_INDEX;
-        own_module_ = false;
-    } else {
-        // Fallback: unload any crossfeed null sink
-        run_sys_cmd("pactl list short modules 2>/dev/null | grep module-null-sink | grep 'sink_name=crossfeed' | awk '{print $1}' | while read -r id; do [ -n \"$id\" ] && pactl unload-module \"$id\" 2>/dev/null; done");
+    if (own_module_) {
+        run_sys_cmd("pactl unload-module " + std::to_string(null_sink_module_index_) + " >/dev/null 2>&1");
     }
+    null_sink_module_index_ = PA_INVALID_INDEX;
+    own_module_ = false;
 }
 
 std::string PulseBackend::resolve_target_sink(const std::string& requested, const std::string& default_sink, const std::vector<SinkDevice>& sinks) {
@@ -348,7 +345,7 @@ bool PulseBackend::run() {
     std::vector<float> out_buf(buffer_frames_ * 2);
     const size_t bytes = buffer_frames_ * sizeof(float) * 2;
 
-    while (running_.load()) {
+    while (!stop_requested_.load()) {
         if (pa_simple_read(rec_stream_, in_buf.data(), bytes, &error) < 0) {
             if (running_.load()) {
                 std::cerr << "[crossfeed] Record error: " << pa_strerror(error) << std::endl;
@@ -366,15 +363,20 @@ bool PulseBackend::run() {
         }
     }
 
-    stop();
+    running_.store(false);
+    cleanup();
     return true;
 }
 
 void PulseBackend::stop() {
+    stop_requested_.store(true);
+}
+
+void PulseBackend::cleanup() {
     running_.store(false);
     unload_null_sink();
     if (play_stream_) {
-        pa_simple_drain(play_stream_, nullptr);
+        // Do not drain on cancellation: the owner is closing the stream.
         pa_simple_free(play_stream_);
         play_stream_ = nullptr;
     }

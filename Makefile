@@ -1,5 +1,5 @@
 CXX ?= g++
-CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -ffast-math -pthread
+CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -fno-math-errno -fno-trapping-math -pthread
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 DATADIR ?= $(PREFIX)/share
@@ -35,7 +35,7 @@ SRCS = src/main.cpp \
 OBJS = $(SRCS:.cpp=.o)
 TARGET = bin/crossfeed
 
-.PHONY: all clean install uninstall bench deb rpm xbps pkg check-deps test update upgrade check-update
+.PHONY: all clean install uninstall bench deb rpm xbps pkg check-deps test test-rt test-tsan test-sanitize preview update upgrade check-update
 
 all: $(TARGET)
 
@@ -62,9 +62,9 @@ check-deps:
 	fi
 
 $(TARGET): $(OBJS) | bin
-	$(CXX) $(OBJS) $(ALL_LIBS) -o $@
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(OBJS) $(ALL_LIBS) -o $@
 
-$(OBJS): | check-deps
+$(OBJS): Makefile | check-deps
 
 %.o: %.cpp
 	$(CXX) $(ALL_CFLAGS) -c $< -o $@
@@ -75,14 +75,54 @@ bin:
 TEST_TARGET = bin/test_dsp
 TEST_SRCS = test/test_dsp.cpp src/dsp.cpp src/config.cpp
 
-test: $(TEST_TARGET)
+test: $(TEST_TARGET) bin/test_ipc
 	./$(TEST_TARGET)
+	./bin/test_ipc
 
-$(TEST_TARGET): $(TEST_SRCS) | bin check-deps
-	$(CXX) $(CXXFLAGS) -Isrc $(TEST_SRCS) -o $@
+bin/test_ipc: test/test_ipc.cpp src/ipc.cpp src/dsp.cpp src/config.cpp $(wildcard src/*.hpp) Makefile | bin
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -Isrc test/test_ipc.cpp src/ipc.cpp src/dsp.cpp src/config.cpp -o $@
+
+bin/test_rt: test/test_rt.cpp src/dsp.cpp src/dsp.hpp src/audio_math.hpp Makefile | bin
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -Isrc test/test_rt.cpp src/dsp.cpp -Wl,--wrap=pthread_mutex_lock -o $@
+
+test-rt: bin/test_rt
+	./bin/test_rt
+
+.PHONY: test-routing
+test-routing: $(TARGET)
+	python3 test/test_pipewire_lifecycle.py
+
+$(TEST_TARGET): $(TEST_SRCS) $(wildcard src/*.hpp) Makefile | bin
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -Isrc $(TEST_SRCS) -o $@
+
+bin/test_dsp_tsan: $(TEST_SRCS) $(wildcard src/*.hpp) Makefile | bin
+	$(CXX) -O1 -g -std=c++17 -Wall -Wextra -pthread -fsanitize=thread -fno-omit-frame-pointer -Isrc $(TEST_SRCS) -o $@
+
+bin/test_ipc_tsan: test/test_ipc.cpp src/ipc.cpp src/dsp.cpp src/config.cpp $(wildcard src/*.hpp) Makefile | bin
+	$(CXX) -O1 -g -std=c++17 -Wall -Wextra -pthread -fsanitize=thread -fno-omit-frame-pointer -Isrc test/test_ipc.cpp src/ipc.cpp src/dsp.cpp src/config.cpp -o $@
+
+test-tsan: bin/test_dsp_tsan bin/test_ipc_tsan
+	./bin/test_dsp_tsan
+	./bin/test_ipc_tsan
+
+bin/test_dsp_sanitize: $(TEST_SRCS) $(wildcard src/*.hpp) Makefile | bin
+	$(CXX) -O1 -g -std=c++17 -Wall -Wextra -pthread -fsanitize=address,undefined,float-cast-overflow -fno-omit-frame-pointer -Isrc $(TEST_SRCS) -o $@
+
+bin/test_ipc_sanitize: test/test_ipc.cpp src/ipc.cpp src/dsp.cpp src/config.cpp $(wildcard src/*.hpp) Makefile | bin
+	$(CXX) -O1 -g -std=c++17 -Wall -Wextra -pthread -fsanitize=address,undefined,float-cast-overflow -fno-omit-frame-pointer -Isrc test/test_ipc.cpp src/ipc.cpp src/dsp.cpp src/config.cpp -o $@
+
+test-sanitize: bin/test_dsp_sanitize bin/test_ipc_sanitize
+	./bin/test_dsp_sanitize
+	./bin/test_ipc_sanitize
 
 bench: $(TARGET)
 	./$(TARGET) bench
+
+bin/render_response: test/render_response.cpp src/dsp.cpp src/dsp.hpp src/presets.hpp src/audio_math.hpp Makefile | bin
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -Isrc test/render_response.cpp src/dsp.cpp -o $@
+
+preview: bin/render_response
+	python3 scripts/render-walkthrough.py
 
 deb: $(TARGET)
 	bash ./scripts/package.sh deb

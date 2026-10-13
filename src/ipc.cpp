@@ -99,7 +99,7 @@ void IpcServer::run_loop() {
                         cmd.pop_back();
                     }
                     std::string reply = handle_command(cmd) + "\n";
-                    ssize_t w = write(client_fd, reply.data(), reply.size());
+                    ssize_t w = send(client_fd, reply.data(), reply.size(), MSG_NOSIGNAL);
                     (void)w;
                 }
                 close(client_fd);
@@ -109,34 +109,35 @@ void IpcServer::run_loop() {
 }
 
 static std::string build_status_json(CrossfeedDSP* dsp, AudioBackend* backend) {
+    const auto params = dsp->get_params();
     const auto* p = detect_active_preset(
-        dsp->get_level_db(),
-        dsp->get_freq_hz(),
-        dsp->get_delay_us(),
-        dsp->get_phase_apf_hz(),
-        dsp->get_center_trim_db(),
-        dsp->get_shadow_hz(),
-        dsp->get_advanced_effects()
+        params.level_db,
+        params.freq_hz,
+        params.delay_us,
+        params.phase_apf_hz,
+        params.center_trim_db,
+        params.shadow_hz,
+        params.advanced_effects
     );
 
     std::ostringstream ss;
     ss << "{\n"
        << "  \"status\": \"" << (backend && backend->is_running() ? "running" : "stopped") << "\",\n"
-       << "  \"enabled\": " << (dsp->is_enabled() ? "true" : "false") << ",\n"
+       << "  \"enabled\": " << (params.enabled ? "true" : "false") << ",\n"
        << "  \"preset\": \"" << (p ? p->name : "Custom") << "\",\n"
        << std::fixed << std::setprecision(1)
-       << "  \"level_db\": " << dsp->get_level_db() << ",\n"
+       << "  \"level_db\": " << params.level_db << ",\n"
        << std::setprecision(0)
-       << "  \"freq_hz\": " << dsp->get_freq_hz() << ",\n"
+       << "  \"freq_hz\": " << params.freq_hz << ",\n"
        << std::setprecision(1)
-       << "  \"delay_us\": " << dsp->get_delay_us() << ",\n"
+       << "  \"delay_us\": " << params.delay_us << ",\n"
        << std::setprecision(0)
-       << "  \"phase_apf_hz\": " << dsp->get_phase_apf_hz() << ",\n"
+       << "  \"phase_apf_hz\": " << params.phase_apf_hz << ",\n"
        << std::setprecision(1)
-       << "  \"center_trim_db\": " << dsp->get_center_trim_db() << ",\n"
+       << "  \"center_trim_db\": " << params.center_trim_db << ",\n"
        << std::setprecision(0)
-       << "  \"shadow_hz\": " << dsp->get_shadow_hz() << ",\n"
-       << "  \"advanced_effects\": " << (dsp->get_advanced_effects() ? "true" : "false") << ",\n"
+       << "  \"shadow_hz\": " << params.shadow_hz << ",\n"
+       << "  \"advanced_effects\": " << (params.advanced_effects ? "true" : "false") << ",\n"
        << "  \"backend\": \"" << (backend ? backend->get_backend_name() : "unknown") << "\",\n"
        << "  \"target\": \"" << (backend ? backend->get_active_target() : "") << "\",\n"
        << "  \"sample_rate\": " << (backend ? backend->get_sample_rate() : 48000) << ",\n"
@@ -170,107 +171,80 @@ std::string IpcServer::handle_command(const std::string& cmd) {
         while (!p_name.empty() && (p_name.back() == ' ' || p_name.back() == '\t' || p_name.back() == '\r' || p_name.back() == '\n')) p_name.pop_back();
         const auto* p = find_preset(p_name);
         if (p) {
-            dsp_->set_level_db(p->level_db);
-            dsp_->set_freq_hz(p->freq_hz);
-            dsp_->set_delay_us(p->delay_us);
-            dsp_->set_phase_apf_hz(p->phase_apf_hz);
-            dsp_->set_center_trim_db(p->center_trim_db);
-            dsp_->set_shadow_hz(p->shadow_hz);
-            dsp_->set_advanced_effects(true);
-
-            config_->level_db = p->level_db;
-            config_->freq_hz = p->freq_hz;
-            config_->delay_us = p->delay_us;
-            config_->phase_apf_hz = p->phase_apf_hz;
-            config_->center_trim_db = p->center_trim_db;
-            config_->shadow_hz = p->shadow_hz;
-            config_->advanced_effects = true;
+            const auto old = dsp_->get_params();
+            if (!dsp_->set_all_params(old.sample_rate, p->level_db, p->freq_hz,
+                p->delay_us, p->phase_apf_hz, p->center_trim_db, p->shadow_hz, true, old.enabled))
+                return "{\"error\":\"invalid_parameters\"}";
+            const auto applied = dsp_->get_params();
+            config_->level_db = applied.level_db;
+            config_->freq_hz = applied.freq_hz;
+            config_->delay_us = applied.delay_us;
+            config_->phase_apf_hz = applied.phase_apf_hz;
+            config_->center_trim_db = applied.center_trim_db;
+            config_->shadow_hz = applied.shadow_hz;
+            config_->advanced_effects = applied.advanced_effects;
             Config::save_state(*config_);
             return build_status_json(dsp_, backend_);
         } else {
             return "{\"error\": \"unknown_preset\"}";
         }
     } else if (cmd.rfind("SET ", 0) == 0) {
+        // Parse the entire transaction first. Invalid input must not partially
+        // update DSP, saved settings, or a preset's coefficient snapshot.
+        auto params = dsp_->get_params();
         std::istringstream iss(cmd.substr(4));
         std::string token;
         bool changed = false;
         while (iss >> token) {
-            size_t eq = token.find('=');
-            if (eq != std::string::npos) {
-                std::string k = token.substr(0, eq);
-                std::string v = token.substr(eq + 1);
-                if (k == "enabled") {
-                    bool en = (v == "true" || v == "1" || v == "on");
-                    dsp_->set_enabled(en);
-                    config_->enabled = en;
-                    changed = true;
-                } else if (k == "level" || k == "level_db") {
-                    try {
-                        float lvl = std::stof(v);
-                        dsp_->set_level_db(lvl);
-                        config_->level_db = dsp_->get_level_db();
-                        changed = true;
-                    } catch (...) {}
-                } else if (k == "freq" || k == "freq_hz") {
-                    try {
-                        float f = std::stof(v);
-                        dsp_->set_freq_hz(f);
-                        config_->freq_hz = dsp_->get_freq_hz();
-                        changed = true;
-                    } catch (...) {}
-                } else if (k == "delay" || k == "delay_us") {
-                    try {
-                        float d = std::stof(v);
-                        dsp_->set_delay_us(d);
-                        config_->delay_us = dsp_->get_delay_us();
-                        changed = true;
-                    } catch (...) {}
-                } else if (k == "phase" || k == "phase_apf_hz" || k == "phase_hz") {
-                    try {
-                        float p = std::stof(v);
-                        dsp_->set_phase_apf_hz(p);
-                        config_->phase_apf_hz = dsp_->get_phase_apf_hz();
-                        changed = true;
-                    } catch (...) {}
-                } else if (k == "trim" || k == "center_trim_db" || k == "trim_db") {
-                    try {
-                        float t = std::stof(v);
-                        dsp_->set_center_trim_db(t);
-                        config_->center_trim_db = dsp_->get_center_trim_db();
-                        changed = true;
-                    } catch (...) {}
-                } else if (k == "shadow" || k == "shadow_hz") {
-                    try {
-                        float s = std::stof(v);
-                        dsp_->set_shadow_hz(s);
-                        config_->shadow_hz = dsp_->get_shadow_hz();
-                        changed = true;
-                    } catch (...) {}
-                } else if (k == "advanced" || k == "advanced_effects" || k == "effects") {
-                    bool adv = (v == "true" || v == "1" || v == "on");
-                    dsp_->set_advanced_effects(adv);
-                    config_->advanced_effects = adv;
-                    changed = true;
-                } else if (k == "pure" || k == "pure_crossfeed") {
-                    bool adv = !(v == "true" || v == "1" || v == "on");
-                    dsp_->set_advanced_effects(adv);
-                    config_->advanced_effects = adv;
-                    changed = true;
-                }
+            const size_t eq = token.find('=');
+            if (eq == std::string::npos) return "{\"error\":\"invalid_parameters\"}";
+            const std::string k = token.substr(0, eq), v = token.substr(eq + 1);
+            float* field = nullptr;
+            if (k == "level" || k == "level_db") field = &params.level_db;
+            else if (k == "freq" || k == "freq_hz") field = &params.freq_hz;
+            else if (k == "delay" || k == "delay_us") field = &params.delay_us;
+            else if (k == "phase" || k == "phase_apf_hz" || k == "phase_hz") field = &params.phase_apf_hz;
+            else if (k == "trim" || k == "center_trim_db" || k == "trim_db") field = &params.center_trim_db;
+            else if (k == "shadow" || k == "shadow_hz") field = &params.shadow_hz;
+            if (field) {
+                try {
+                    size_t end = 0;
+                    const float value = std::stof(v, &end);
+                    if (end != v.size() || !std::isfinite(value)) return "{\"error\":\"invalid_number\"}";
+                    *field = value;
+                } catch (...) { return "{\"error\":\"invalid_number\"}"; }
+            } else {
+                const bool yes = v == "true" || v == "1" || v == "on";
+                const bool no = v == "false" || v == "0" || v == "off";
+                if (!yes && !no) return "{\"error\":\"invalid_boolean\"}";
+                if (k == "enabled") params.enabled = yes;
+                else if (k == "advanced" || k == "advanced_effects" || k == "effects") params.advanced_effects = yes;
+                else if (k == "pure" || k == "pure_crossfeed") params.advanced_effects = !yes;
+                else return "{\"error\":\"unknown_parameter\"}";
             }
+            changed = true;
         }
         if (changed) {
+            if (!dsp_->set_all_params(params.sample_rate, params.level_db, params.freq_hz,
+                params.delay_us, params.phase_apf_hz, params.center_trim_db,
+                params.shadow_hz, params.advanced_effects, params.enabled))
+                return "{\"error\":\"invalid_parameters\"}";
+            params = dsp_->get_params();
+            config_->enabled = params.enabled;
+            config_->advanced_effects = params.advanced_effects;
+            config_->level_db = params.level_db;
+            config_->freq_hz = params.freq_hz;
+            config_->delay_us = params.delay_us;
+            config_->phase_apf_hz = params.phase_apf_hz;
+            config_->center_trim_db = params.center_trim_db;
+            config_->shadow_hz = params.shadow_hz;
             Config::save_state(*config_);
         }
         return build_status_json(dsp_, backend_);
     } else if (cmd == "STOP") {
-        if (stop_callback_) {
-            // Trigger stop in another thread so this response finishes writing
-            std::thread([this]() {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                stop_callback_();
-            }).detach();
-        }
+        // stop() only requests cancellation. The processing owner tears down;
+        // ipc.stop() joins this thread after it has sent the response.
+        if (stop_callback_) stop_callback_();
         return "{\"status\":\"stopping\"}";
     } else if (cmd == "PING") {
         return "PONG";

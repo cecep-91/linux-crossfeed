@@ -89,7 +89,9 @@ static void on_filter_process(void *userdata, struct spa_io_position *position) 
 static const struct pw_filter_events filter_events = {
     .version = PW_VERSION_FILTER_EVENTS,
     .destroy = nullptr,
-    .state_changed = nullptr,
+    .state_changed = [](void* data, enum pw_filter_state, enum pw_filter_state state, const char* error) {
+        static_cast<PipeWireBackend*>(data)->filter_state_changed(state, error);
+    },
     .io_changed = nullptr,
     .param_changed = nullptr,
     .add_buffer = nullptr,
@@ -102,7 +104,18 @@ static const struct pw_filter_events filter_events = {
 PipeWireBackend::PipeWireBackend() = default;
 
 PipeWireBackend::~PipeWireBackend() {
-    stop();
+    cleanup();
+}
+
+std::string PipeWireBackend::get_active_target() const {
+    std::lock_guard<std::mutex> lock(target_mutex_);
+    return reported_target_;
+}
+
+void PipeWireBackend::set_active_target(const std::string& target) {
+    active_target_sink_ = target; // Lifecycle/link thread only.
+    std::lock_guard<std::mutex> lock(target_mutex_);
+    reported_target_ = target;
 }
 
 std::string PipeWireBackend::resolve_default_sink() {
@@ -146,12 +159,10 @@ bool PipeWireBackend::load_null_sink() {
         if (fgets(buf, sizeof(buf), fp)) {
             try {
                 null_sink_module_index_ = std::stoul(buf);
-                own_module_ = true;
-                pclose(fp);
+                own_module_ = false;
             } catch (...) {}
-        } else {
-            pclose(fp);
         }
+        pclose(fp);
     }
 
     // 2. Load module-null-sink
@@ -173,6 +184,10 @@ bool PipeWireBackend::load_null_sink() {
         return false;
     }
 
+    return true;
+}
+
+void PipeWireBackend::activate_routing() {
     // 3. Move active physical sink inputs to crossfeed so ongoing audio immediately routes through filter,
     // preserving intermediate filter chains like EasyEffects.
     std::string init_move_cmd =
@@ -185,7 +200,7 @@ bool PipeWireBackend::load_null_sink() {
 
     // 4. Set crossfeed as default sink
     run_sys_cmd("pactl set-default-sink crossfeed 2>/dev/null");
-    return true;
+    routing_active_ = true;
 }
 
 void PipeWireBackend::unload_null_sink() {
@@ -198,7 +213,7 @@ void PipeWireBackend::unload_null_sink() {
         restore_sink = find_best_physical_sink();
     }
 
-    if (!restore_sink.empty() && restore_sink != "crossfeed" && restore_sink != "Crossfeed") {
+    if (routing_active_ && !restore_sink.empty() && restore_sink != "crossfeed" && restore_sink != "Crossfeed") {
         std::string move_cmd =
             "cf_idx=$(pactl list short sinks 2>/dev/null | grep -w 'crossfeed' | awk '{print $1}'); "
             "pactl list short sink-inputs 2>/dev/null | while read -r id s_idx rest; do "
@@ -209,15 +224,13 @@ void PipeWireBackend::unload_null_sink() {
         run_sys_cmd(def_cmd);
     }
 
-    // 2. Unload module
-    if (null_sink_module_index_ != 0xFFFFFFFFU) {
-        std::string cmd = "pactl unload-module " + std::to_string(null_sink_module_index_) + " >/dev/null 2>&1";
-        run_sys_cmd(cmd);
-        null_sink_module_index_ = 0xFFFFFFFFU;
-        own_module_ = false;
-    } else {
-        run_sys_cmd("pactl list short modules 2>/dev/null | grep module-null-sink | grep 'sink_name=crossfeed' | awk '{print $1}' | while read -r id; do [ -n \"$id\" ] && pactl unload-module \"$id\" 2>/dev/null; done");
+    // Never unload a sink that was already present before this instance.
+    if (own_module_ && null_sink_module_index_ != 0xFFFFFFFFU) {
+        run_sys_cmd("pactl unload-module " + std::to_string(null_sink_module_index_) + " >/dev/null 2>&1");
     }
+    null_sink_module_index_ = 0xFFFFFFFFU;
+    own_module_ = false;
+    routing_active_ = false;
 }
 
 std::vector<SinkDevice> PipeWireBackend::list_sinks() {
@@ -252,9 +265,9 @@ bool PipeWireBackend::init(CrossfeedDSP* dsp, const std::string& target_sink, ui
             std::cerr << "[crossfeed] Error: Invalid target sink name: " << requested_target_ << std::endl;
             return false;
         }
-        active_target_sink_ = requested_target_;
+        set_active_target(requested_target_);
     } else {
-        active_target_sink_ = resolve_default_sink();
+        set_active_target(resolve_default_sink());
     }
 
     if (active_target_sink_.empty() || !is_valid_port_name(active_target_sink_)) {
@@ -274,9 +287,16 @@ bool PipeWireBackend::init(CrossfeedDSP* dsp, const std::string& target_sink, ui
     }
 
     pw_init(nullptr, nullptr);
+    pw_initialized_ = true;
 
     loop_ = pw_main_loop_new(nullptr);
     if (!loop_) return false;
+    control_timer_ = pw_loop_add_timer(pw_main_loop_get_loop(loop_),
+        [](void* data, uint64_t) { static_cast<PipeWireBackend*>(data)->service_control(); }, this);
+    if (!control_timer_) return false;
+    timespec interval{0, 5000000}; // 5 ms; runs off the RT data thread.
+    if (pw_loop_update_timer(pw_main_loop_get_loop(loop_), control_timer_, &interval, &interval, false) < 0)
+        return false;
 
     struct pw_properties *props = pw_properties_new(
         PW_KEY_MEDIA_TYPE, "Audio",
@@ -296,11 +316,7 @@ bool PipeWireBackend::init(CrossfeedDSP* dsp, const std::string& target_sink, ui
         &filter_events,
         this
     );
-    if (!filter_) {
-        pw_main_loop_destroy(loop_);
-        loop_ = nullptr;
-        return false;
-    }
+    if (!filter_) return false;
 
     in_port_l_ = pw_filter_add_port(
         filter_, PW_DIRECTION_INPUT, PW_FILTER_PORT_FLAG_MAP_BUFFERS,
@@ -344,22 +360,45 @@ bool PipeWireBackend::init(CrossfeedDSP* dsp, const std::string& target_sink, ui
         NULL, 0
     );
 
+    if (!in_port_l_ || !in_port_r_ || !out_port_l_ || !out_port_r_) return false;
+
     if (pw_filter_connect(filter_, PW_FILTER_FLAG_RT_PROCESS, nullptr, 0) < 0) {
         std::cerr << "[crossfeed] Failed to connect pw_filter." << std::endl;
         return false;
     }
 
-    dsp_->set_params(static_cast<float>(sample_rate_), dsp_->get_level_db(), dsp_->get_freq_hz(), dsp_->is_enabled());
+    dsp_->request_sample_rate(sample_rate_.load());
+    if (!dsp_->service_sample_rate()) return false;
     return true;
 }
 
-void PipeWireBackend::process_audio(struct spa_io_position *position) {
-    uint32_t n_samples = position ? position->clock.duration : buffer_frames_;
-    if (n_samples == 0) return;
+void PipeWireBackend::service_control() {
+    if (stop_requested_.load()) {
+        pw_main_loop_quit(loop_);
+        return;
+    }
+    dsp_->service_sample_rate();
+}
 
-    if (position && position->clock.rate.denom > 0 && position->clock.rate.denom != sample_rate_) {
-        sample_rate_ = position->clock.rate.denom;
-        dsp_->set_params(static_cast<float>(sample_rate_), dsp_->get_level_db(), dsp_->get_freq_hz(), dsp_->is_enabled());
+void PipeWireBackend::filter_state_changed(enum pw_filter_state state, const char* error) {
+    if (state == PW_FILTER_STATE_ERROR) {
+        std::cerr << "[crossfeed] PipeWire filter error: " << (error ? error : "unknown") << '\n';
+        failed_.store(true);
+        stop();
+    }
+}
+
+void PipeWireBackend::process_audio(struct spa_io_position *position) {
+    const uint32_t n_samples = position ? position->clock.duration : buffer_frames_.load();
+    if (n_samples == 0) return;
+    buffer_frames_.store(n_samples, std::memory_order_relaxed);
+    if (position) {
+        const auto& rate = position->clock.rate;
+        const uint32_t hz = rate.num > 0 ? rate.denom / rate.num : 0;
+        sample_rate_.store(hz, std::memory_order_relaxed);
+        // A nonzero invalid rate keeps DSP in dry fallback until negotiation
+        // supplies a supported rate. No getters, mutexes, or coefficient math.
+        dsp_->request_sample_rate(hz == 0 ? 1 : hz);
     }
 
     float *in_l = static_cast<float*>(pw_filter_get_dsp_buffer(in_port_l_, n_samples));
@@ -385,20 +424,25 @@ void PipeWireBackend::link_manager_loop() {
     // Initial delay for filter registration in the graph
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-    // Connect crossfeed:monitor -> crossfeed-dsp input
-    safe_pw_link("crossfeed:monitor_FL", "crossfeed-dsp:in_FL");
-    safe_pw_link("crossfeed:monitor_FR", "crossfeed-dsp:in_FR");
-
-    // Connect crossfeed-dsp output -> physical target sink
-    safe_pw_link("crossfeed-dsp:out_FL", target_playback_fl_);
-    safe_pw_link("crossfeed-dsp:out_FR", target_playback_fr_);
+    if (stop_requested_.load()) return;
+    bool bridged = safe_pw_link("crossfeed:monitor_FL", "crossfeed-dsp:in_FL");
+    bridged = safe_pw_link("crossfeed:monitor_FR", "crossfeed-dsp:in_FR") && bridged;
+    bridged = safe_pw_link("crossfeed-dsp:out_FL", target_playback_fl_) && bridged;
+    bridged = safe_pw_link("crossfeed-dsp:out_FR", target_playback_fr_) && bridged;
+    if (!bridged) {
+        std::cerr << "[crossfeed] Could not establish all stereo bridge links.\n";
+        failed_.store(true);
+        stop();
+        return;
+    }
+    activate_routing();
 
     struct PortLinks {
         std::vector<std::string> inputs;
         std::vector<std::string> outputs;
     };
 
-    while (running_.load()) {
+    while (!stop_requested_.load()) {
         // Dynamically follow default physical output device if requested target is auto
         if (requested_target_.empty() || requested_target_ == "auto") {
             std::string cur_def = resolve_default_sink();
@@ -406,7 +450,7 @@ void PipeWireBackend::link_manager_loop() {
                 safe_pw_link("crossfeed-dsp:out_FL", target_playback_fl_, true);
                 safe_pw_link("crossfeed-dsp:out_FR", target_playback_fr_, true);
 
-                active_target_sink_ = cur_def;
+                set_active_target(cur_def);
                 original_default_sink_ = cur_def;
                 target_playback_fl_ = active_target_sink_ + ":playback_FL";
                 target_playback_fr_ = active_target_sink_ + ":playback_FR";
@@ -521,9 +565,15 @@ void PipeWireBackend::link_manager_loop() {
             if (tgt_fl_it != graph.end()) {
                 for (const auto& src : tgt_fl_it->second.inputs) {
                     if (src.find("crossfeed") == std::string::npos && is_valid_port_name(src)) {
-                        safe_pw_link(src, target_playback_fl_, true);
-                        safe_pw_link(src, "crossfeed:playback_FL");
-                        rogue_target_found = true;
+                        const std::string redirected = "crossfeed:playback_FL";
+                        if (safe_pw_link(src, redirected)) {
+                            if (safe_pw_link(src, target_playback_fl_, true)) {
+                                rerouted_links_.push_back({src, target_playback_fl_, redirected});
+                                rogue_target_found = true;
+                            } else {
+                                safe_pw_link(src, redirected, true);
+                            }
+                        }
                     }
                 }
             }
@@ -534,9 +584,15 @@ void PipeWireBackend::link_manager_loop() {
             if (tgt_fr_it != graph.end()) {
                 for (const auto& src : tgt_fr_it->second.inputs) {
                     if (src.find("crossfeed") == std::string::npos && is_valid_port_name(src)) {
-                        safe_pw_link(src, target_playback_fr_, true);
-                        safe_pw_link(src, "crossfeed:playback_FR");
-                        rogue_target_found = true;
+                        const std::string redirected = "crossfeed:playback_FR";
+                        if (safe_pw_link(src, redirected)) {
+                            if (safe_pw_link(src, target_playback_fr_, true)) {
+                                rerouted_links_.push_back({src, target_playback_fr_, redirected});
+                                rogue_target_found = true;
+                            } else {
+                                safe_pw_link(src, redirected, true);
+                            }
+                        }
                     }
                 }
             }
@@ -560,6 +616,12 @@ void PipeWireBackend::link_manager_loop() {
 }
 
 void PipeWireBackend::restore_all_links() {
+    for (const auto& link : rerouted_links_) {
+        // If the user removed our link in the meantime, leave their route alone.
+        if (safe_pw_link(link.source, link.redirected, true))
+            safe_pw_link(link.source, link.original);
+    }
+    rerouted_links_.clear();
     safe_pw_link("crossfeed:monitor_FL", "crossfeed-dsp:in_FL", true);
     safe_pw_link("crossfeed:monitor_FR", "crossfeed-dsp:in_FR", true);
     safe_pw_link("crossfeed-dsp:out_FL", target_playback_fl_, true);
@@ -576,35 +638,38 @@ bool PipeWireBackend::run() {
     std::cout << "[crossfeed] Native PipeWire DSP filter running. Real-time audio active.\n";
     pw_main_loop_run(loop_);
 
-    stop();
-    return true;
+    cleanup();
+    return !failed_.load();
 }
 
 void PipeWireBackend::stop() {
-    if (!running_.load()) return;
+    stop_requested_.store(true);
+}
+
+void PipeWireBackend::cleanup() {
+    stop_requested_.store(true);
     running_.store(false);
-
-    if (link_thread_.joinable()) {
-        link_thread_.join();
-    }
-
-    restore_all_links();
-
-    if (loop_) {
-        pw_main_loop_quit(loop_);
-    }
-
+    if (link_thread_.joinable()) link_thread_.join();
     if (filter_) {
+        pw_filter_set_active(filter_, false);
+        restore_all_links();
         pw_filter_destroy(filter_);
         filter_ = nullptr;
+    } else if (null_sink_module_index_ != 0xFFFFFFFFU) {
+        unload_null_sink();
     }
-
     if (loop_) {
+        if (control_timer_) {
+            pw_loop_destroy_source(pw_main_loop_get_loop(loop_), control_timer_);
+            control_timer_ = nullptr;
+        }
         pw_main_loop_destroy(loop_);
         loop_ = nullptr;
     }
-
-    pw_deinit();
+    if (pw_initialized_) {
+        pw_deinit();
+        pw_initialized_ = false;
+    }
 }
 
 } // namespace crossfeed

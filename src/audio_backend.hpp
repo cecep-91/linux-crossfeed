@@ -19,6 +19,8 @@ public:
 
     virtual bool init(CrossfeedDSP* dsp, const std::string& target_sink, uint32_t sample_rate, uint32_t buffer_frames) = 0;
     virtual bool run() = 0;
+    // Thread-safe cancellation request only. run() owns processing and cleanup;
+    // destroy the backend only after run() has returned and callers have joined.
     virtual void stop() = 0;
 
     virtual std::string get_backend_name() const = 0;

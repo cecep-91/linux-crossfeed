@@ -1,6 +1,9 @@
 #include "dsp.hpp"
 #include "config.hpp"
 #include "presets.hpp"
+#include "audio_math.hpp"
+#include <limits>
+#include <array>
 
 #include <iostream>
 #include <cmath>
@@ -315,7 +318,8 @@ static void test_crossfeed_dsp_stability() {
     assert(!dsp.is_enabled());
     std::vector<float> test_in(256 * 2, 0.75f);
     std::vector<float> test_out(256 * 2, 0.0f);
-    dsp.process_interleaved(test_in.data(), test_out.data(), 256);
+    for (int block = 0; block < 5; ++block)
+        dsp.process_interleaved(test_in.data(), test_out.data(), 256);
     for (size_t i = 0; i < 256 * 2; ++i) {
         assert(test_out[i] == 0.75f);
     }
@@ -327,9 +331,10 @@ static void test_config_state_roundtrip() {
     std::cout << "[TEST] Config State Round-Trip..." << std::endl;
 
     // Use isolated temp directory for XDG_CONFIG_HOME
-    fs::path tmp_dir = fs::temp_directory_path() / "pipewire_crossfeed_test_config";
-    fs::remove_all(tmp_dir);
-    fs::create_directories(tmp_dir);
+    std::string template_path = (fs::temp_directory_path() / "crossfeed-config-XXXXXX").string();
+    char* created = mkdtemp(template_path.data());
+    assert(created);
+    fs::path tmp_dir(created);
 
     const char* prev_xdg = std::getenv("XDG_CONFIG_HOME");
     std::string prev_xdg_val = prev_xdg ? prev_xdg : "";
@@ -411,6 +416,8 @@ static void test_lockfree_concurrent_processing() {
         std::vector<float> out_l(BLOCK_FRAMES, 0.0f), out_r(BLOCK_FRAMES, 0.0f);
 
         while (!stop_flag.load(std::memory_order_relaxed)) {
+            if (blocks_processed.load() % 16 == 0)
+                dsp.request_sample_rate(blocks_processed.load() % 32 == 0 ? 48000 : 96000);
             dsp.process_interleaved(in_buf.data(), out_buf.data(), BLOCK_FRAMES);
             for (float s : out_buf) {
                 assert(!is_invalid_float(s));
@@ -425,6 +432,8 @@ static void test_lockfree_concurrent_processing() {
             blocks_processed.fetch_add(1, std::memory_order_relaxed);
         }
     });
+
+    while (blocks_processed.load() == 0) std::this_thread::yield();
 
     // Thread 2: Writer Thread updating various individual parameters
     std::thread writer_thread_1([&]() {
@@ -446,6 +455,7 @@ static void test_lockfree_concurrent_processing() {
     // Thread 3: Writer Thread calling set_all_params, set_params, and reset
     std::thread writer_thread_2([&]() {
         for (int i = 0; i < 500 && !stop_flag.load(std::memory_order_relaxed); ++i) {
+            dsp.service_sample_rate();
             if (i % 5 == 0) {
                 dsp.reset();
             }
@@ -462,7 +472,7 @@ static void test_lockfree_concurrent_processing() {
 
     assert(blocks_processed.load() > 0);
     std::cout << "  PASS: Concurrently updated parameters across multiple threads while processing "
-              << blocks_processed.load() << " audio blocks with no data races or invalid floats" << std::endl;
+              << blocks_processed.load() << " audio blocks with finite outputs (run test-tsan to check races)" << std::endl;
 }
 
 static void test_presets() {
@@ -501,18 +511,178 @@ static void test_presets() {
     std::cout << "  PASS: Preset lookup, ID matching, and tolerance detection verified" << std::endl;
 }
 
-int main() {
-    // Enable FTZ/DAZ mode if hardware supports it (standard for audio DSP)
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-#elif defined(__aarch64__)
-    uint64_t fpcr;
-    __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
-    fpcr |= (1 << 24);
-    __asm__ __volatile__("msr fpcr, %0" : : "r"(fpcr));
-#endif
 
+static bool stable(const BiquadCoeffs& c) {
+    const std::complex<double> discriminant(c.a1 * static_cast<double>(c.a1) - 4.0 * c.a2, 0);
+    const auto root = std::sqrt(discriminant);
+    return std::abs((-static_cast<double>(c.a1) + root) * 0.5) < 1.0 &&
+           std::abs((-static_cast<double>(c.a1) - root) * 0.5) < 1.0;
+}
+
+static void test_parameter_boundaries() {
+    std::cout << "[TEST] Finite validation, Nyquist limits, and 192 kHz precision...\n";
+    CrossfeedDSP dsp;
+    const auto initial = dsp.get_params();
+    for (float bad : {std::numeric_limits<float>::quiet_NaN(),
+                      std::numeric_limits<float>::infinity(),
+                      -std::numeric_limits<float>::infinity()}) {
+        assert(!dsp.set_level_db(bad));
+        assert(!dsp.set_freq_hz(bad));
+        assert(!dsp.set_delay_us(bad));
+        assert(!dsp.set_phase_apf_hz(bad));
+        assert(!dsp.set_center_trim_db(bad));
+        assert(!dsp.set_shadow_hz(bad));
+        assert(!dsp.set_params(bad, -10, 700, true));
+        assert(dsp.get_params().generation == initial.generation);
+        DelayLine delay;
+        assert(delay.read(bad) == 0.0f);
+    }
+    assert(!dsp.set_params(0, -10, 700, true));
+    assert(!dsp.set_params(384000, -10, 700, true));
+    for (float rate : {8000.f, 11025.f, 16000.f, 44100.f, 48000.f, 96000.f, 192000.f}) {
+        for (float cutoff : {200.f, 650.f, 2000.f}) {
+            assert(dsp.set_all_params(rate, -9.5f, cutoff, 800, 4000, -1.5f, 8000, true, true));
+            const auto p = dsp.get_params();
+            assert(p.shadow_hz <= rate * .45f && p.phase_apf_hz <= rate * .45f);
+            for (const auto& c : {p.dir_coeffs, p.cross_coeffs, p.apf_coeffs, p.shadow_coeffs}) assert(stable(c));
+            const auto lp = biquad_transfer_function(p.cross_coeffs, 0, rate);
+            const auto shelf = biquad_transfer_function(p.dir_coeffs, 0, rate);
+            const double expected = std::pow(10.0, (FULL_DIR_GAIN * (p.gain2 / FULL_GAIN2)) / 20.0);
+            assert(std::abs(lp.real() - 1.0) < .002);
+            assert(std::abs(shelf.real() - expected) < .003);
+            dsp.reset();
+            std::vector<float> input(32768 * 2, 0.f), output(input.size());
+            input[0] = 1.f;
+            dsp.process_interleaved(input.data(), output.data(), 32768);
+            for (float x : output) assert(!is_invalid_float(x) && std::abs(x) < 2.f);
+        }
+    }
+    BiquadCoeffs invalid;
+    CrossfeedDSP::compute_lowpass(invalid, 8000, 5000, .7071f);
+    assert(invalid.b0 == 1.f && invalid.a1 == 0.f); // Public helper fails closed to identity.
+}
+
+static std::complex<double> cross_response(const FilterParams& p, double f) {
+    const double omega = 2.0 * M_PI * f / p.sample_rate;
+    const auto z = std::exp(std::complex<double>(0, -omega));
+    const int integer = static_cast<int>(p.delay_samples);
+    const double fraction = p.delay_samples - integer;
+    auto h = static_cast<double>(p.gain2) * biquad_transfer_function(p.cross_coeffs, f, p.sample_rate);
+    if (p.advanced_effects) {
+        h *= biquad_transfer_function(p.shadow_coeffs, f, p.sample_rate) *
+             biquad_transfer_function(p.apf_coeffs, f, p.sample_rate) *
+             std::pow(z, integer) * (1.0 - fraction + fraction * z);
+    }
+    return h;
+}
+
+static void test_full_chain_response() {
+    std::cout << "[TEST] Meier mono/side impulse response and planar/interleaved equivalence...\n";
+    constexpr size_t frames = 32768;
+    for (bool advanced : {false, true}) {
+        for (float side : {1.f, -1.f}) {
+            CrossfeedDSP dsp, planar;
+            for (auto* engine : {&dsp, &planar})
+                assert(engine->set_all_params(48000, -9.5f, 650, 280, 1500, -1.5f, 3200, advanced, true));
+            auto p = dsp.get_params();
+            std::vector<float> in(frames * 2, 0.f), out(in.size()), l(frames, 0.f), r(frames, 0.f), ol(frames), oright(frames);
+            in[0] = l[0] = 1.f; in[1] = r[0] = side;
+            dsp.process_interleaved(in.data(), out.data(), frames);
+            planar.process_planar(l.data(), r.data(), ol.data(), oright.data(), frames);
+            for (size_t n = 0; n < frames; ++n) {
+                assert(out[2*n] == ol[n] && out[2*n+1] == oright[n]);
+            }
+            for (double f : {0., 200., 410., 650., 1500., 5000.}) {
+                std::complex<double> actual(0, 0);
+                const auto step = std::exp(std::complex<double>(0, -2.0 * M_PI * f / p.sample_rate));
+                std::complex<double> phase(1, 0);
+                for (size_t n = 0; n < frames; ++n, phase *= step) actual += static_cast<double>(ol[n]) * phase;
+                auto expected = biquad_transfer_function(p.dir_coeffs, f, p.sample_rate) + static_cast<double>(side) * cross_response(p, f);
+                if (advanced) expected *= static_cast<double>(p.trim_linear);
+                assert(std::abs(actual - expected) < 2e-4);
+                if (advanced && side == 1.f && f == 410.) {
+                    const double db = 20 * std::log10(std::abs(actual));
+                    // Characterize existing voicing; this is NOT a flatness target.
+                    assert(db > -5.7 && db < -5.5);
+                }
+            }
+        }
+    }
+}
+
+static void test_rate_handoff() {
+    std::cout << "[TEST] Rate mismatch passthrough and bounded recovery...\n";
+    CrossfeedDSP dsp;
+    std::array<float, 512> in, out;
+    in.fill(.25f);
+    dsp.process_interleaved(in.data(), out.data(), 256);
+    dsp.request_sample_rate(96000);
+    dsp.process_interleaved(in.data(), out.data(), 256);
+    assert(in == out); // Control worker has deliberately not run yet.
+    assert(dsp.set_level_db(-15)); // Concurrent control change incorporates requested rate.
+    assert(dsp.service_sample_rate());
+    assert(dsp.get_sample_rate() == 96000 && dsp.get_level_db() == -15);
+    for (int i = 0; i < 20; ++i) dsp.process_interleaved(in.data(), out.data(), 256);
+    assert(out != in);
+    for (float x : out) assert(!is_invalid_float(x));
+    dsp.request_sample_rate(4000);
+    assert(!dsp.service_sample_rate());
+    dsp.process_interleaved(in.data(), out.data(), 256);
+    assert(in == out);
+    dsp.request_sample_rate(48000);
+    assert(dsp.service_sample_rate());
+    for (int i = 0; i < 12; ++i) dsp.process_interleaved(in.data(), out.data(), 256);
+    assert(out != in && dsp.get_level_db() == -15);
+}
+
+static void test_smooth_transitions() {
+    std::cout << "[TEST] Smoothed mode, bypass, and parameter changes...\n";
+    CrossfeedDSP dsp;
+    std::array<float, 128> in, out;
+    in.fill(.25f);
+    for (int i = 0; i < 100; ++i) dsp.process_interleaved(in.data(), out.data(), 64);
+    float previous = out.back();
+    for (int change = 0; change < 8; ++change) {
+        dsp.set_all_params(48000, change % 2 ? -3.f : -30.f, change % 2 ? 2000.f : 200.f,
+                           change % 2 ? 800.f : 0.f, 200, change % 2 ? -6.f : 0.f, 1000,
+                           change % 3 == 0, change % 4 != 0);
+        for (int block = 0; block < 40; ++block) {
+            dsp.process_interleaved(in.data(), out.data(), 64);
+            for (size_t n = 0; n < 64; ++n) {
+                const float sample = out[2*n];
+                assert(std::isfinite(sample));
+                assert(std::abs(sample - previous) < .015f);
+                previous = sample;
+            }
+        }
+    }
+    // Updates received during a fade must eventually adopt the latest target.
+    dsp.set_enabled(true);
+    dsp.process_interleaved(in.data(), out.data(), 64);
+    dsp.set_enabled(false);
+    for (int i = 0; i < 60; ++i) dsp.process_interleaved(in.data(), out.data(), 64);
+    assert(in == out);
+}
+
+static void test_denormal_scope() {
+    std::cout << "[TEST] Production denormal policy and caller FP environment restoration...\n";
+#if defined(__SSE2__)
+    const unsigned original = _mm_getcsr();
+    _mm_setcsr(original & ~((1u << 15) | (1u << 6)));
+    const unsigned before = _mm_getcsr();
+#endif
+    CrossfeedDSP dsp;
+    std::vector<float> in(96000 * 2, 0.f), out(in.size());
+    in[0] = 1.f;
+    dsp.process_interleaved(in.data(), out.data(), 96000);
+#if defined(__SSE2__)
+    assert(_mm_getcsr() == before);
+    _mm_setcsr(original);
+#endif
+    for (float x : out) assert(!is_invalid_float(x));
+}
+
+int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "Running Crossfeed DSP & Core Test Suite" << std::endl;
     std::cout << "========================================" << std::endl;
@@ -525,6 +695,11 @@ int main() {
     test_config_state_roundtrip();
     test_lockfree_concurrent_processing();
     test_presets();
+    test_parameter_boundaries();
+    test_full_chain_response();
+    test_rate_handoff();
+    test_smooth_transitions();
+    test_denormal_scope();
 
     std::cout << "========================================" << std::endl;
     std::cout << "All DSP and core characterization tests passed!" << std::endl;

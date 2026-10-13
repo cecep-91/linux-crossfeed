@@ -5,6 +5,7 @@
 #include "benchmark.hpp"
 #include "gui.hpp"
 #include "presets.hpp"
+#include "shutdown.hpp"
 #include <iostream>
 #include <csignal>
 #include <unistd.h>
@@ -15,21 +16,11 @@
 
 using namespace crossfeed;
 
-static std::atomic<bool> g_shutdown_requested{false};
-static AudioBackend* g_active_backend = nullptr;
-
-static void sig_handler(int /*signo*/) {
-    g_shutdown_requested.store(true);
-    if (g_active_backend) {
-        g_active_backend->stop();
-    }
-}
-
 static bool parse_cli_float(const std::string& opt_name, const char* str_val, float& out_val) {
     try {
         size_t idx = 0;
         out_val = std::stof(str_val, &idx);
-        if (idx != std::string(str_val).length()) {
+        if (idx != std::string(str_val).length() || !std::isfinite(out_val)) {
             std::cerr << "[crossfeed] Error: Invalid numeric value for " << opt_name << ": '" << str_val << "'\n";
             return false;
         }
@@ -84,7 +75,7 @@ static void print_help(const char* prog) {
               << "  help, --help      Show this help message\n"
               << "  --version         Show version information\n\n"
               << "Run Options:\n"
-              << "  --backend <name>  Audio backend: 'auto' (default), 'pulse', 'alsa'\n"
+              << "  --backend <name>  Audio backend: 'auto' (default), 'pipewire', 'pulse', 'alsa'\n"
               << "  --target <sink>   Target output sink (default: auto non-crossfeed sink)\n"
               << "  --level <dB>      Crossfeed blend level in dB (-30.0 to -3.0, default: -10.0)\n"
               << "  --freq <Hz>       Crossover frequency in Hz (200 to 2000, default: 700)\n"
@@ -94,8 +85,8 @@ static void print_help(const char* prog) {
               << "  --shadow <Hz>     Head acoustic shadow cutoff in Hz (1000 to 8000, default: 3000)\n"
               << "  --advanced <0|1>  Enable all acoustic spatial effects (1) or pure crossfeed (0)\n"
               << "  --pure            Pure crossfeed mode (bypass delay, phase, shadow, and trim)\n"
-              << "  --rate <Hz>       Sample rate (default: 48000)\n"
-              << "  --buffer <frames> Buffer size (default: 256)\n"
+              << "  --rate <Hz>       Sample rate (8000–192000, default: 48000)\n"
+              << "  --buffer <frames> Buffer size; PipeWire reports negotiated quantum (default: 256)\n"
               << "  --bypass          Start in bypassed state\n\n"
               << "Set Options:\n"
               << "  --level <dB>      Set blend level in dB\n"
@@ -223,10 +214,19 @@ static int cmd_run(int argc, char** argv) {
               << "  Head Shadow: " << config.shadow_hz << " Hz\n"
               << "  Filter: " << (config.enabled ? "ENABLED" : "BYPASSED") << "\n";
 
+    if (!CrossfeedDSP::valid_sample_rate(static_cast<float>(config.sample_rate)) ||
+        config.buffer_frames == 0 || config.buffer_frames > 65536) {
+        std::cerr << "[crossfeed] Rate must be 8000–192000 Hz and buffer 1–65536 frames.\n";
+        return 1;
+    }
+    ShutdownSignals signals;
     CrossfeedDSP dsp;
-    dsp.set_all_params(static_cast<float>(config.sample_rate), config.level_db, config.freq_hz,
+    if (!dsp.set_all_params(static_cast<float>(config.sample_rate), config.level_db, config.freq_hz,
                        config.delay_us, config.phase_apf_hz, config.center_trim_db, config.shadow_hz,
-                       config.advanced_effects, config.enabled);
+                       config.advanced_effects, config.enabled)) {
+        std::cerr << "[crossfeed] Invalid non-finite DSP settings.\n";
+        return 1;
+    }
 
     auto backend = create_backend(config.backend);
     if (!backend) {
@@ -239,12 +239,7 @@ static int cmd_run(int argc, char** argv) {
         return 1;
     }
 
-    g_active_backend = backend.get();
-
-    struct sigaction sa{};
-    sa.sa_handler = sig_handler;
-    sigaction(SIGINT, &sa, nullptr);
-    sigaction(SIGTERM, &sa, nullptr);
+    ShutdownWatcher shutdown(signals, *backend);
 
     std::string sock_path = Config::get_socket_path();
     IpcServer ipc(&dsp, backend.get(), &config);
@@ -261,7 +256,6 @@ static int cmd_run(int argc, char** argv) {
     bool ok = backend->run();
 
     ipc.stop();
-    g_active_backend = nullptr;
     std::cout << "[crossfeed] Engine shutdown cleanly.\n";
     return ok ? 0 : 1;
 }
@@ -669,7 +663,7 @@ int main(int argc, char** argv) {
         run_benchmark();
         return 0;
     } else if (cmd == "--version" || cmd == "-v") {
-        std::cout << "pipewire-crossfeed 2.3.1 (standalone)\n";
+        std::cout << "pipewire-crossfeed 2.4.0 (standalone)\n";
         return 0;
     } else if (cmd == "help" || cmd == "--help" || cmd == "-h") {
         print_help(argv[0]);

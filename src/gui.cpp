@@ -570,6 +570,7 @@ public:
                 std::ostringstream lat;
                 lat << state.buffer_frames << " frames (" << std::fixed << std::setprecision(1) << ms << " ms @ " << (state.sample_rate / 1000) << " kHz)";
                 gtk_label_set_text(GTK_LABEL(latency_val_label), lat.str().c_str());
+                gtk_widget_set_tooltip_text(latency_val_label, "Audio block duration. This does not include the complete graph, device, or transport latency.");
             }
 
             // Tray indicator
@@ -959,7 +960,7 @@ public:
         gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(app->window));
         gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
         gtk_about_dialog_set_program_name(GTK_ABOUT_DIALOG(dialog), "PipeWire Crossfeed");
-        gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(dialog), "2.3.1");
+        gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(dialog), "2.4.0");
         gtk_about_dialog_set_comments(GTK_ABOUT_DIALOG(dialog),
             "Standalone ultra-low-latency headphone crossfeed audio processor.\n"
             "Reduces headphone listening fatigue and spatializes stereo imaging.\n\n"
@@ -1570,7 +1571,7 @@ public:
             gtk_grid_attach(GTK_GRID(grid), target_val_label, 1, 3, 1, 1);
 
             // Row 4: Latency
-            GtkWidget* l_lat = gtk_label_new("Latency:");
+            GtkWidget* l_lat = gtk_label_new("Buffer / quantum:");
             gtk_label_set_xalign(GTK_LABEL(l_lat), 0.0);
             latency_val_label = gtk_label_new("256 frames (5.3 ms)");
             gtk_label_set_xalign(GTK_LABEL(latency_val_label), 0.0);

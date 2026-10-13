@@ -26,6 +26,12 @@ jobs:
           sudo apt-get install -y build-essential libpipewire-0.3-dev libpulse-dev libasound2-dev libgtk-3-dev libayatana-appindicator3-dev rpm dpkg-dev
       - name: Build crossfeed application
         run: make -j$(nproc)
+      - name: Run DSP, IPC, and shutdown regression tests
+        run: make test test-rt test-routing
+      - name: Run address and undefined-behavior checks
+        run: make test-sanitize
+      - name: Run thread race checks
+        run: make test-tsan
       - name: Run DSP throughput benchmark
         run: make bench
       - name: Build Debian (.deb) and RPM (.rpm) packages
