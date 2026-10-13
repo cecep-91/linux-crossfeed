@@ -75,9 +75,22 @@ bin:
 TEST_TARGET = bin/test_dsp
 TEST_SRCS = test/test_dsp.cpp src/dsp.cpp src/config.cpp
 
-test: $(TEST_TARGET) bin/test_ipc
+test: $(TEST_TARGET) bin/test_ipc bin/test_response
 	./$(TEST_TARGET)
 	./bin/test_ipc
+	./bin/test_response
+
+bin/test_response: test/test_response.cpp src/dsp.cpp src/dsp.hpp src/response.hpp src/presets.hpp src/audio_math.hpp Makefile | bin
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -Isrc test/test_response.cpp src/dsp.cpp -o $@
+
+bin/test_gui: test/test_gui.cpp src/gui.cpp src/ipc.cpp src/dsp.cpp src/config.cpp $(wildcard src/*.hpp) Makefile | bin
+	$(CXX) $(CXXFLAGS) $(GTK_CFLAGS) $(LDFLAGS) -Isrc test/test_gui.cpp src/ipc.cpp src/dsp.cpp src/config.cpp $(GTK_LIBS) -o $@
+
+# Use xvfb-run -a make test-gui on a headless machine. Preview mode never
+# contacts the audio engine. GTK_THEME can select Adwaita, Adwaita:dark or Breeze.
+.PHONY: test-gui
+test-gui: bin/test_gui
+	./bin/test_gui
 
 bin/test_ipc: test/test_ipc.cpp src/ipc.cpp src/dsp.cpp src/config.cpp $(wildcard src/*.hpp) Makefile | bin
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -Isrc test/test_ipc.cpp src/ipc.cpp src/dsp.cpp src/config.cpp -o $@

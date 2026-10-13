@@ -157,7 +157,17 @@ if [ -f "$SRC_DIR/scripts/update.sh" ]; then
 fi
 
 echo "==> Installing desktop launcher and icons"
-install -m 644 "$SRC_DIR/data/crossfeed.desktop" "$APPS_DIR/crossfeed.desktop"
+# Desktop sessions need not share the shell's PATH. Prefer this user install
+# even when an older distribution package exists in /usr/bin.
+# Escape both the desktop-entry string and the quoted Exec argument.
+desktop_exec=$(printf '%s' "$BIN_DIR/crossfeed" | sed 's/\\/\\\\\\\\/g; s/"/\\\\"/g; s/`/\\\\`/g; s/\$/\\\\$/g; s/%/%%/g')
+while IFS= read -r line; do
+    case "$line" in
+        Exec=*) printf 'Exec="%s"\n' "$desktop_exec" ;;
+        *) printf '%s\n' "$line" ;;
+    esac
+done < "$SRC_DIR/data/crossfeed.desktop" > "$APPS_DIR/crossfeed.desktop"
+chmod 644 "$APPS_DIR/crossfeed.desktop"
 install -m 644 "$SRC_DIR/data/crossfeed.svg" "$ICONS_DIR/crossfeed.svg"
 
 update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true

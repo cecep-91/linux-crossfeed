@@ -88,6 +88,8 @@ static void print_help(const char* prog) {
               << "  --rate <Hz>       Sample rate (8000–192000, default: 48000)\n"
               << "  --buffer <frames> Buffer size; PipeWire reports negotiated quantum (default: 256)\n"
               << "  --bypass          Start in bypassed state\n\n"
+              << "GUI Options:\n"
+              << "  gui --preview    Explore the interface without starting or contacting the engine\n\n"
               << "Set Options:\n"
               << "  --level <dB>      Set blend level in dB\n"
               << "  --freq <Hz>       Set crossover frequency in Hz\n"
@@ -663,7 +665,7 @@ int main(int argc, char** argv) {
         run_benchmark();
         return 0;
     } else if (cmd == "--version" || cmd == "-v") {
-        std::cout << "pipewire-crossfeed 2.4.0 (standalone)\n";
+        std::cout << "pipewire-crossfeed 2.5.0 (standalone)\n";
         return 0;
     } else if (cmd == "help" || cmd == "--help" || cmd == "-h") {
         print_help(argv[0]);

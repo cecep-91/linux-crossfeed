@@ -138,13 +138,13 @@ xbps-rindex -a dist/*.xbps
 sudo xbps-install -R dist crossfeed
 
 # Debian / Ubuntu / Linux Mint (.deb)
-sudo apt install ./dist/crossfeed_2.4.0-1_amd64.deb
+sudo apt install ./dist/crossfeed_2.5.0-1_amd64.deb
 
 # Fedora / RHEL / openSUSE (.rpm)
-sudo dnf install ./dist/crossfeed-2.4.0-1.x86_64.rpm
+sudo dnf install ./dist/crossfeed-2.5.0-1.x86_64.rpm
 
 # Fedora Silverblue / Kinoite / Bazzite / CoreOS (rpm-ostree)
-rpm-ostree install ./dist/crossfeed-2.4.0-1.x86_64.rpm
+rpm-ostree install ./dist/crossfeed-2.5.0-1.x86_64.rpm
 ```
 
 > [!NOTE]
@@ -281,6 +281,24 @@ Released under the [MIT License](LICENSE). Copyright © 2024–2026.
 
 ## Development checks
 
+The GTK3 interface follows the active desktop theme (including Adwaita and KDE's
+Breeze GTK theme), with light/dark colors, wrapping presets, and controls that
+reflow on smaller windows. The **Frequency response** graph updates immediately
+when you change a preset, slider, spatial-effects mode, or bypass setting.
+The solid line shows mono (direct + crossfeed); the dashed line shows side
+(direct − crossfeed). Hover for frequency and gain values. This is a calculated
+steady-state filter response, not a live spectrum analyzer. It includes phase,
+fractional delay and output trim, using the engine's coefficient preparation.
+
+To explore the interface without starting or contacting the audio engine:
+
+```sh
+./bin/crossfeed gui --preview
+```
+
+Preview controls are local and are not saved. Close the preview to exit. Normal
+GUI mode continues to control the running engine and integrate with the tray.
+
 ```sh
 make -j4
 make test test-rt test-routing
@@ -288,8 +306,15 @@ make test-sanitize
 make test-tsan
 make bench
 make preview
+# Optional GTK interaction checks; requires a display or Xvfb:
+xvfb-run -a make test-gui
 ```
 
 Core tests do not require GTK development headers. Sanitizer targets need the compiler's matching sanitizer runtime/development packages (Void: `libsanitizer-devel`). The IPC test needs Unix socket permissions. The routing failure test replaces routing commands and uses an isolated PipeWire runtime directory.
+
+`make test` also compares the graph model with processed DSP impulses at 8–192 kHz.
+`test-gui` exercises the real widgets in disconnected preview mode and writes
+screenshots to `/tmp/crossfeed-gui-preview`. Use `GTK_THEME=Adwaita:dark` or
+`GTK_THEME=Breeze` with that command to test another installed GTK theme.
 
 The GUI reports audio block duration; this is not complete graph/device latency. `make bench` reports measured offline callback time for steady audio, decaying silence, and parameter changes. Its result is not a guarantee against xruns. PulseAudio cancellation can remain blocked until its simple API I/O returns; hardware hotplug and live routing require separate integration testing.
