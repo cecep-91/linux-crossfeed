@@ -160,6 +160,8 @@ echo "==> Installing desktop launcher and icons"
 # Desktop sessions need not share the shell's PATH. Prefer this user install
 # even when an older distribution package exists in /usr/bin.
 # Escape both the desktop-entry string and the quoted Exec argument.
+# Dollar signs and backticks below are literal characters, not shell expansions.
+# shellcheck disable=SC2016
 desktop_exec=$(printf '%s' "$BIN_DIR/crossfeed" | sed 's/\\/\\\\\\\\/g; s/"/\\\\"/g; s/`/\\\\`/g; s/\$/\\\\$/g; s/%/%%/g')
 while IFS= read -r line; do
     case "$line" in
