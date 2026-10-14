@@ -1,3 +1,12 @@
+# Crossfeed 2.6.1 — GUI switch lever state synchronization fix
+
+- Fixes `GtkSwitch` toggling and sliding behavior on GNOME and KDE desktops (master bypass switch and spatial effects switch).
+- Properly handles `state-set` gesture signals to confirm animation completion and synchronize slider handle state.
+- Prevents UI status polling from interrupting active switch drag and click animations.
+- Enforces `GTK_ALIGN_CENTER` widget alignment on switch controls to eliminate trough stretching under themes like Orchis and Breeze.
+
+---
+
 # Crossfeed 2.6.0 — optional listening comparisons and saved presets
 
 - Original audio follows the processed path's active output trim: −2 dB trim applies −2 dB to both. The shared preamp also applies to both. Pure mode bypasses the trim stage on both paths. No automatic loudness measurement or calibration is performed.

@@ -539,7 +539,14 @@ public:
             }
         } else {
             gtk_widget_show(enable_box);
-            gtk_switch_set_active(GTK_SWITCH(master_switch), state.enabled);
+            if (master_switch) {
+                if (gtk_switch_get_active(GTK_SWITCH(master_switch)) != state.enabled) {
+                    gtk_switch_set_active(GTK_SWITCH(master_switch), state.enabled);
+                }
+                if (gtk_switch_get_state(GTK_SWITCH(master_switch)) != state.enabled) {
+                    gtk_switch_set_state(GTK_SWITCH(master_switch), state.enabled);
+                }
+            }
             gtk_stack_set_visible_child_name(GTK_STACK(main_stack), "controls");
 
             // Update primary sliders
@@ -566,7 +573,12 @@ public:
 
             // Update mode switch & advanced widgets sensitivity
             if (effects_switch) {
-                gtk_switch_set_active(GTK_SWITCH(effects_switch), state.advanced_effects);
+                if (gtk_switch_get_active(GTK_SWITCH(effects_switch)) != state.advanced_effects) {
+                    gtk_switch_set_active(GTK_SWITCH(effects_switch), state.advanced_effects);
+                }
+                if (gtk_switch_get_state(GTK_SWITCH(effects_switch)) != state.advanced_effects) {
+                    gtk_switch_set_state(GTK_SWITCH(effects_switch), state.advanced_effects);
+                }
             }
             if (advanced_controls_box) {
                 gtk_widget_set_sensitive(advanced_controls_box, state.advanced_effects);
@@ -726,17 +738,46 @@ public:
         return GDK_EVENT_PROPAGATE;
     }
 
+    static gboolean on_switch_state_set(GtkSwitch* sw, gboolean state, gpointer user_data) {
+        auto* app = static_cast<CrossfeedGuiApp*>(user_data);
+        if (app->suppress_events) return FALSE;
+        gtk_switch_set_state(sw, state);
+        if (app->state.enabled != state) {
+            app->apply_current_ui_params(state);
+        }
+        return TRUE;
+    }
+
     static void on_switch_changed(GObject* object, GParamSpec*, gpointer user_data) {
         auto* app = static_cast<CrossfeedGuiApp*>(user_data);
-        if (!app->suppress_events)
-            app->apply_current_ui_params(gtk_switch_get_active(GTK_SWITCH(object)));
+        if (app->suppress_events) return;
+        gboolean val = gtk_switch_get_active(GTK_SWITCH(object));
+        if (app->state.enabled != val) {
+            gtk_switch_set_state(GTK_SWITCH(object), val);
+            app->apply_current_ui_params(val);
+        }
+    }
+
+    static gboolean on_effects_state_set(GtkSwitch* sw, gboolean state, gpointer user_data) {
+        auto* app = static_cast<CrossfeedGuiApp*>(user_data);
+        if (app->suppress_events) return FALSE;
+        gtk_switch_set_state(sw, state);
+        if (app->state.advanced_effects != state) {
+            app->state.advanced_effects = state;
+            app->apply_current_ui_params(app->state.enabled);
+        }
+        return TRUE;
     }
 
     static void on_effects_changed(GObject* object, GParamSpec*, gpointer user_data) {
         auto* app = static_cast<CrossfeedGuiApp*>(user_data);
         if (app->suppress_events) return;
-        app->state.advanced_effects = gtk_switch_get_active(GTK_SWITCH(object));
-        app->apply_current_ui_params(app->state.enabled);
+        gboolean val = gtk_switch_get_active(GTK_SWITCH(object));
+        if (app->state.advanced_effects != val) {
+            gtk_switch_set_state(GTK_SWITCH(object), val);
+            app->state.advanced_effects = val;
+            app->apply_current_ui_params(app->state.enabled);
+        }
     }
 
     void apply_current_ui_params(bool en) {
@@ -995,7 +1036,7 @@ public:
         gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(app->window));
         gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
         gtk_about_dialog_set_program_name(GTK_ABOUT_DIALOG(dialog), "PipeWire Crossfeed");
-        gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(dialog), "2.6.0");
+        gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(dialog), "2.6.1");
         gtk_about_dialog_set_comments(GTK_ABOUT_DIALOG(dialog),
             "Standalone ultra-low-latency headphone crossfeed audio processor.\n"
             "Reduces headphone listening fatigue and spatializes stereo imaging.\n\n"
@@ -1365,7 +1406,9 @@ public:
         // Master bypass switch in header bar
         master_switch = gtk_switch_new();
         gtk_widget_set_valign(master_switch, GTK_ALIGN_CENTER);
+        gtk_widget_set_halign(master_switch, GTK_ALIGN_CENTER);
         gtk_widget_set_tooltip_text(master_switch, "Enable crossfeed or hear the original audio (Ctrl+B). Both use the same active output trim and output volume.");
+        g_signal_connect(master_switch, "state-set", G_CALLBACK(on_switch_state_set), this);
         g_signal_connect(master_switch, "notify::active", G_CALLBACK(on_switch_changed), this);
         atk_object_set_name(gtk_widget_get_accessible(master_switch), "Enable crossfeed");
         enable_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -1463,8 +1506,10 @@ public:
         gtk_box_pack_start(GTK_BOX(mode_row), mode_text, TRUE, TRUE, 0);
         effects_switch = gtk_switch_new();
         gtk_widget_set_valign(effects_switch, GTK_ALIGN_CENTER);
+        gtk_widget_set_halign(effects_switch, GTK_ALIGN_CENTER);
         atk_object_set_name(gtk_widget_get_accessible(effects_switch), "Enable spatial effects");
         gtk_widget_set_tooltip_text(effects_switch, "Off: pure crossfeed. On: add delay, phase rotation, head shadow and output trim.");
+        g_signal_connect(effects_switch, "state-set", G_CALLBACK(on_effects_state_set), this);
         g_signal_connect(effects_switch, "notify::active", G_CALLBACK(on_effects_changed), this);
         gtk_box_pack_end(GTK_BOX(mode_row), effects_switch, FALSE, FALSE, 0);
         gtk_box_pack_start(GTK_BOX(spatial), mode_row, FALSE, FALSE, 0);

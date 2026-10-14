@@ -65,6 +65,16 @@ int main(int argc, char** argv) {
     for (const auto& p : app.response_graph.points) assert(std::abs(p.mono - app.state.center_trim_db) < .001 && std::abs(p.side - app.state.center_trim_db) < .001);
     assert(gtk_widget_get_sensitive(app.controls_box));
     gtk_switch_set_active(GTK_SWITCH(app.master_switch), TRUE);
+    // User click interactions emit state-set; verify active and state stay synchronized.
+    gboolean switch_handled = FALSE;
+    g_signal_emit_by_name(app.master_switch, "state-set", FALSE, &switch_handled);
+    assert(switch_handled && !app.state.enabled && !gtk_switch_get_active(GTK_SWITCH(app.master_switch)) && !gtk_switch_get_state(GTK_SWITCH(app.master_switch)));
+    g_signal_emit_by_name(app.master_switch, "state-set", TRUE, &switch_handled);
+    assert(switch_handled && app.state.enabled && gtk_switch_get_active(GTK_SWITCH(app.master_switch)) && gtk_switch_get_state(GTK_SWITCH(app.master_switch)));
+    g_signal_emit_by_name(app.effects_switch, "state-set", FALSE, &switch_handled);
+    assert(switch_handled && !app.state.advanced_effects && !gtk_switch_get_active(GTK_SWITCH(app.effects_switch)) && !gtk_switch_get_state(GTK_SWITCH(app.effects_switch)));
+    g_signal_emit_by_name(app.effects_switch, "state-set", TRUE, &switch_handled);
+    assert(switch_handled && app.state.advanced_effects && gtk_switch_get_active(GTK_SWITCH(app.effects_switch)) && gtk_switch_get_state(GTK_SWITCH(app.effects_switch)));
     gtk_adjustment_set_value(app.level_adj, -20);
     assert(app.response_graph.params.level_db == -20);
     crossfeed::CrossfeedGuiApp::on_preset_button_clicked(nullptr, const_cast<crossfeed::CrossfeedPreset*>(&crossfeed::g_presets[0]));
