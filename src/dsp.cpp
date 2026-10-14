@@ -9,7 +9,9 @@ constexpr double PI = 3.14159265358979323846;
 
 CrossfeedDSP::CrossfeedDSP() {
     recompute_coeffs(control_params_);
-    for (auto& p : param_buffers_) p = control_params_;
+    control_snapshot_.current = control_params_;
+    for (auto& p : param_buffers_) p = control_snapshot_;
+    pending_snapshot_ = control_snapshot_;
     pending_params_ = control_params_;
 }
 
@@ -21,9 +23,10 @@ bool CrossfeedDSP::normalize_params(FilterParams& p) {
     if (!valid_sample_rate(p.sample_rate) || !std::isfinite(p.level_db) ||
         !std::isfinite(p.freq_hz) || !std::isfinite(p.delay_us) ||
         !std::isfinite(p.phase_apf_hz) || !std::isfinite(p.center_trim_db) ||
-        !std::isfinite(p.shadow_hz)) return false;
+        !std::isfinite(p.shadow_hz) || !std::isfinite(p.preamp_db)) return false;
     // Keep distance from the degenerate Nyquist boundary, including at 8 kHz.
     const float ceiling = p.sample_rate * 0.45f;
+    p.preamp_db = std::clamp(p.preamp_db, -24.0f, 12.0f);
     p.level_db = std::clamp(p.level_db, MIN_LEVEL_DB, MAX_LEVEL_DB);
     p.freq_hz = std::clamp(p.freq_hz, MIN_FREQ_HZ, std::min(MAX_FREQ_HZ, ceiling));
     p.delay_us = std::clamp(p.delay_us, MIN_DELAY_US, MAX_DELAY_US);
@@ -39,8 +42,15 @@ bool CrossfeedDSP::publish_locked(FilterParams p) {
     if (!normalize_params(p)) return false;
     p.generation = control_params_.generation + 1;
     recompute_coeffs(p);
+    for (unsigned slot = 0; slot < 2; ++slot) {
+        auto& saved = control_snapshot_.slots[slot];
+        saved.sample_rate = p.sample_rate;
+        normalize_params(saved);
+        recompute_coeffs(saved);
+    }
     control_params_ = p;
-    param_buffers_[write_idx_] = p;
+    control_snapshot_.current = p;
+    param_buffers_[write_idx_] = control_snapshot_;
     // Acquire recovers a slot released by the reader; release publishes ours.
     write_idx_ = exchange_idx_.exchange(write_idx_ | DIRTY, std::memory_order_acq_rel) & ~DIRTY;
     return true;
@@ -160,6 +170,7 @@ void CrossfeedDSP::reset() {
 }
 
 void CrossfeedDSP::recompute_coeffs(FilterParams& params) {
+    params.preamp_linear = static_cast<float>(std::pow(10.0, params.preamp_db / 20.0));
     params.gain2 = std::pow(10.0f, params.level_db / 20.0f);
     params.trim_linear = std::pow(10.0f, params.center_trim_db / 20.0f);
     params.delay_samples = (params.delay_us / 1000000.0f) * params.sample_rate;
@@ -280,7 +291,10 @@ void CrossfeedDSP::Engine::process(float l, float r, float& out_l, float& out_r)
     delay_l.write(apf_l.process(shadow_l.process(cl, params.shadow_coeffs), params.apf_coeffs));
     delay_r.write(apf_r.process(shadow_r.process(cr, params.shadow_coeffs), params.apf_coeffs));
     if (!params.enabled) {
-        out_l = l; out_r = r;
+        // Bypass follows the processed path's active output trim. Pure mode
+        // has no trim on either path. Shared preamp is applied by the caller.
+        const float trim = params.advanced_effects ? params.trim_linear : 1.0f;
+        out_l = l * trim; out_r = r * trim;
     } else if (params.advanced_effects) {
         out_l = (dl + params.gain2 * delay_r.read(delay_samples)) * params.trim_linear;
         out_r = (dr + params.gain2 * delay_l.read(delay_samples)) * params.trim_linear;
@@ -293,7 +307,12 @@ void CrossfeedDSP::Engine::process(float l, float r, float& out_l, float& out_r)
 bool CrossfeedDSP::begin_block() noexcept {
     if (exchange_idx_.load(std::memory_order_acquire) & DIRTY) {
         read_idx_ = exchange_idx_.exchange(read_idx_, std::memory_order_acq_rel) & ~DIRTY;
-        pending_params_ = param_buffers_[read_idx_];
+        pending_snapshot_ = param_buffers_[read_idx_];
+        pending_params_ = pending_snapshot_.current;
+    }
+    if (meter_revision_ != pending_snapshot_.meter_reset) {
+        meters_ = ListeningStatus{};
+        meter_revision_ = pending_snapshot_.meter_reset;
     }
     const bool reset = reset_requested_.exchange(false, std::memory_order_acquire);
     const uint32_t rate = requested_rate_.load(std::memory_order_acquire);
@@ -312,6 +331,9 @@ bool CrossfeedDSP::begin_block() noexcept {
         if (awaiting_rate_ && !reset) {
             engines_[1 - active_engine_] = current;
             current.params.enabled = false;
+            // Recovery fades from the actual unscaled rate-fallback output.
+            current.params.advanced_effects = false;
+            current.params.preamp_linear = 1.0f;
             fade_length_ = std::max(1u, static_cast<unsigned>(pending_params_.sample_rate * TRANSITION_SECONDS));
             fade_remaining_ = fade_length_;
         }
@@ -328,9 +350,14 @@ bool CrossfeedDSP::begin_block() noexcept {
 
 void CrossfeedDSP::process_sample(float l, float r, float& out_l, float& out_r) noexcept {
     engines_[active_engine_].process(l, r, out_l, out_r);
+    const float gain = engines_[active_engine_].params.preamp_linear;
+    out_l *= gain; out_r *= gain;
     if (fade_remaining_ > 0) {
         float next_l, next_r;
         engines_[1 - active_engine_].process(l, r, next_l, next_r);
+        const unsigned next_engine = 1 - active_engine_;
+        const float next_gain = engines_[next_engine].params.preamp_linear;
+        next_l *= next_gain; next_r *= next_gain;
         const float mix = 1.0f - static_cast<float>(fade_remaining_ - 1) / static_cast<float>(fade_length_);
         out_l += mix * (next_l - out_l);
         out_r += mix * (next_r - out_r);
@@ -341,23 +368,100 @@ void CrossfeedDSP::process_sample(float l, float r, float& out_l, float& out_r) 
 void CrossfeedDSP::process_interleaved(const float* in, float* out, size_t frames) noexcept {
     if (frames == 0) return;
     ScopedDenormals denormals;
+    block_input_peak_ = block_output_peak_ = 0;
     const bool ready = begin_block();
     for (size_t i = 0; i < frames; ++i) {
         const float l = in[2 * i], r = in[2 * i + 1];
         if (ready) process_sample(l, r, out[2 * i], out[2 * i + 1]);
         else { out[2 * i] = l; out[2 * i + 1] = r; }
+        meter_sample(l, r, out[2 * i], out[2 * i + 1]);
     }
+    publish_meters();
 }
 
 void CrossfeedDSP::process_planar(const float* in_l, const float* in_r, float* out_l, float* out_r, size_t frames) noexcept {
     if (frames == 0) return;
     ScopedDenormals denormals;
+    block_input_peak_ = block_output_peak_ = 0;
     const bool ready = begin_block();
     for (size_t i = 0; i < frames; ++i) {
         const float l = in_l[i], r = in_r[i];
         if (ready) process_sample(l, r, out_l[i], out_r[i]);
         else { out_l[i] = l; out_r[i] = r; }
+        meter_sample(l, r, out_l[i], out_r[i]);
     }
+    publish_meters();
+}
+
+bool CrossfeedDSP::same_sound(const FilterParams& a, const FilterParams& b) noexcept {
+    return a.level_db == b.level_db && a.freq_hz == b.freq_hz && a.delay_us == b.delay_us &&
+        a.phase_apf_hz == b.phase_apf_hz && a.center_trim_db == b.center_trim_db &&
+        a.shadow_hz == b.shadow_hz && a.advanced_effects == b.advanced_effects;
+}
+
+bool CrossfeedDSP::set_snapshot(FilterParams params) {
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    return publish_locked(params);
+}
+
+bool CrossfeedDSP::set_preamp_db(float value) { return set_numeric(&FilterParams::preamp_db, value); }
+
+void CrossfeedDSP::reset_meters() {
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    ++control_snapshot_.meter_reset;
+    publish_locked(control_params_);
+}
+
+bool CrossfeedDSP::store_slot(unsigned slot) {
+    if (slot > 1) return false;
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    control_snapshot_.slots[slot] = control_params_;
+    control_snapshot_.valid[slot] = true;
+    return publish_locked(control_params_);
+}
+
+bool CrossfeedDSP::recall_slot(unsigned slot) {
+    if (slot > 1) return false;
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    if (!control_snapshot_.valid[slot]) return false;
+    auto p = control_snapshot_.slots[slot];
+    p.enabled = true;
+    p.preamp_db = control_params_.preamp_db; // Shared listening level, not part of an A/B candidate.
+    p.sample_rate = control_params_.sample_rate;
+    return publish_locked(p);
+}
+
+bool CrossfeedDSP::get_slot(unsigned slot, FilterParams& params) const {
+    if (slot > 1) return false;
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    if (!control_snapshot_.valid[slot]) return false;
+    params = control_snapshot_.slots[slot];
+    return true;
+}
+
+ListeningStatus CrossfeedDSP::get_listening_status() const {
+    std::lock_guard<std::mutex> lock(meter_read_mutex_);
+    if (meter_exchange_.load(std::memory_order_acquire) & DIRTY)
+        meter_read_ = meter_exchange_.exchange(meter_read_, std::memory_order_acq_rel) & ~DIRTY;
+    return meter_buffers_[meter_read_];
+}
+
+void CrossfeedDSP::meter_sample(float l, float r, float out_l, float out_r) noexcept {
+    const float input = std::max(std::abs(l), std::abs(r));
+    const float output = std::max(std::abs(out_l), std::abs(out_r));
+    if (std::isfinite(input)) block_input_peak_ = std::max(block_input_peak_, input);
+    if (std::isfinite(output)) block_output_peak_ = std::max(block_output_peak_, output);
+    meters_.input_clip |= input >= 1 || !std::isfinite(l) || !std::isfinite(r);
+    meters_.output_clip |= output >= 1 || !std::isfinite(out_l) || !std::isfinite(out_r);
+}
+
+void CrossfeedDSP::publish_meters() noexcept {
+    meters_.input_peak = block_input_peak_;
+    meters_.output_peak = block_output_peak_;
+    meters_.input_hold = std::max(meters_.input_hold, block_input_peak_);
+    meters_.output_hold = std::max(meters_.output_hold, block_output_peak_);
+    meter_buffers_[meter_write_] = meters_;
+    meter_write_ = meter_exchange_.exchange(meter_write_ | DIRTY, std::memory_order_acq_rel) & ~DIRTY;
 }
 
 } // namespace crossfeed

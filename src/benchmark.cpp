@@ -9,7 +9,7 @@
 
 namespace crossfeed {
 
-static void bench_rate(float rate, size_t frames, bool decay, bool changes) {
+static void bench_rate(float rate, size_t frames, bool decay, bool changes, bool comparing = false) {
     CrossfeedDSP dsp;
     dsp.set_params(rate, -10.0f, 700.0f, true);
     std::vector<float> in(frames * 2, 0.0f), out(in.size());
@@ -17,6 +17,10 @@ static void bench_rate(float rate, size_t frames, bool decay, bool changes) {
     else for (size_t n = 0; n < frames; ++n) {
         in[2*n] = 0.4f * std::sin(6.283185307179586 * 440.0 * n / rate);
         in[2*n+1] = 0.3f * std::sin(6.283185307179586 * 660.0 * n / rate);
+    }
+    if (comparing) {
+        dsp.store_slot(0);
+        dsp.set_level_db(-6); dsp.store_slot(1); dsp.set_level_db(-10);
     }
     dsp.process_interleaved(in.data(), out.data(), frames);
     if (decay) std::fill(in.begin(), in.end(), 0.f);
@@ -26,6 +30,8 @@ static void bench_rate(float rate, size_t frames, bool decay, bool changes) {
         // Model control updates outside the measured callback interval.
         if (changes && block % 32 == 0)
             dsp.set_delay_us(block % 64 == 0 ? 100.f : 700.f);
+        if (comparing && block % 32 == 0) dsp.recall_slot((block / 32) % 2);
+        if (comparing && block % 32 == 16) dsp.set_enabled(false);
         const auto start = std::chrono::steady_clock::now();
         dsp.process_interleaved(in.data(), out.data(), frames);
         const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
@@ -33,7 +39,7 @@ static void bench_rate(float rate, size_t frames, bool decay, bool changes) {
         worst = std::max(worst, seconds);
     }
     std::cout << std::fixed << std::setprecision(0) << "  " << rate << " Hz, " << frames
-              << " frames, " << (decay ? "decay  " : changes ? "changes" : "steady ")
+              << " frames, " << (comparing ? "compare" : decay ? "decay  " : changes ? "changes" : "steady ")
               << std::setprecision(2) << ": mean " << elapsed / blocks * 1e6
               << " us, max observed " << worst * 1e6 << " us, "
               << (elapsed / blocks) / (frames / rate) * 100.0 << "% of quantum on average\n";
@@ -46,6 +52,7 @@ void run_benchmark() {
         bench_rate(rate, frames, false, false);
         bench_rate(rate, frames, true, false);
         bench_rate(rate, frames, false, true);
+        bench_rate(rate, frames, false, false, true);
     }
     std::cout << "These are offline processing times, not graph/device latency or a guarantee against xruns.\n";
 }

@@ -1,3 +1,19 @@
+# Crossfeed 2.6.0 — optional listening comparisons and saved presets
+
+- Original audio follows the processed path's active output trim: −2 dB trim applies −2 dB to both. The shared preamp also applies to both. Pure mode bypasses the trim stage on both paths. No automatic loudness measurement or calibration is performed.
+- The whole Hear the difference card is hidden by default. Enable **Menu → Show comparison tools** to reveal comparison buttons, A/B slots, output volume, and meters. This GUI preference is saved separately from engine state; preview mode never persists it.
+- A/B session slots, original/crossfeed choices with a clear selected state, and guided setup.
+- Custom preset library: save, rename, duplicate, delete, import/export, and exact-name CLI recall. Files are validated and saved atomically; file-management actions live in the More menu.
+- Independent −24 to +12 dB preamp, input/output sample-peak meters, held peaks, and clip indicators. The response graph includes preamp and active trim in bypass.
+- CLI commands: `ab store a|b`, `ab a|b|dry`, `meters reset`, and `set --preamp`.
+- Repository URLs follow the `linux-crossfeed` rename. Configuration paths and release archive names remain compatible. Release packaging includes nested screenshot assets.
+
+Copying trim gives both paths the same output-gain setting; it does not equalize perceived loudness or the energy changes caused by filtering and blending. Existing processed preset voicing is retained. Ordinary bypass and trim changes are smoothed; unsupported sample rates still use unscaled fallback until prepared settings arrive.
+
+Verification covers shared trim at 8–192 kHz, Pure/Advanced modes, planar/interleaved agreement, graph response, A/B recall, GUI preferences, preset storage, telemetry concurrency, and callback allocation/lock checks.
+
+---
+
 # Crossfeed 2.5.0
 
 Crossfeed now has a refreshed GTK interface and an interactive frequency-response graph.

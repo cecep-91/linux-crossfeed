@@ -30,6 +30,9 @@ int main() {
     crossfeed::CrossfeedDSP dsp;
     std::array<float, 512> input{}, output{};
     input.fill(.2f);
+    dsp.store_slot(0);
+    dsp.set_level_db(-6);
+    dsp.store_slot(1);
     for (int block = 0; block < 1000; ++block) {
         if (block % 20 == 0) dsp.set_delay_us(block % 40 ? 800.f : 0.f);
         if (block % 100 == 0) dsp.set_enabled(block % 200 == 0);
@@ -41,6 +44,19 @@ int main() {
         else dsp.process_planar(input.data(), input.data() + 256, output.data(), output.data() + 256, 256);
         in_audio = false;
     }
+    dsp.request_sample_rate(48000); dsp.service_sample_rate();
+    for (int block = 0; block < 900; ++block) {
+        if (block % 50 == 0) dsp.recall_slot((block / 50) % 2);
+        if (block % 50 == 25) dsp.set_enabled(false);
+        if (block % 30 == 0) dsp.set_center_trim_db(-float(block % 6));
+        for (unsigned i = 0; i < 256; ++i)
+            input[2*i] = input[2*i+1] = .2f * std::sin(6.283185307179586 * 410 * (block*256+i) / 48000);
+        in_audio = true;
+        dsp.process_interleaved(input.data(), output.data(), 256);
+        in_audio = false;
+        (void)dsp.get_listening_status();
+    }
+    assert(dsp.get_listening_status().output_hold > 0);
     assert(allocations == 0 && locks == 0);
-    std::cout << "PASS: 1000 audio blocks, including updates/rate fallback/reset, used zero C++ allocations and zero pthread mutex locks.\n";
+    std::cout << "PASS: 1900 audio blocks, including trim/A/B/telemetry/updates/rate fallback/reset, used zero C++ allocations and zero pthread mutex locks.\n";
 }

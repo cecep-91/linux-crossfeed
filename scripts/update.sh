@@ -8,7 +8,7 @@
 #   scripts/update.sh --force     # Force reinstall/rebuild of latest version
 set -euo pipefail
 
-REPO="cecep-91/pipewire-crossfeed"
+REPO="cecep-91/linux-crossfeed"
 API_URL="https://api.github.com/repos/${REPO}/releases/latest"
 DEFAULT_BIN="$HOME/.local/bin/crossfeed"
 

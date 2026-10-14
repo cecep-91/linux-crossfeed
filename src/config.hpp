@@ -7,6 +7,7 @@ namespace crossfeed {
 
 struct ConfigState {
     bool enabled = true;
+    float preamp_db = 0.0f;
     float level_db = -10.0f;
     float freq_hz = 700.0f;
     float delay_us = 280.0f;

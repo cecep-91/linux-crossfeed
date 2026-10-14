@@ -4,6 +4,7 @@
 #include "dsp.hpp"
 #include "presets.hpp"
 #include "gui_response.hpp"
+#include "user_presets.hpp"
 #include <gtk/gtk.h>
 #include <gdk/gdkkeysyms.h>
 #include <libayatana-appindicator/app-indicator.h>
@@ -36,6 +37,11 @@ struct GuiEngineState {
     float phase_apf_hz = DEFAULT_PHASE_APF_HZ;
     float center_trim_db = DEFAULT_CENTER_TRIM_DB;
     float shadow_hz = DEFAULT_SHADOW_HZ;
+    float preamp_db = 0;
+    bool comparison_available = true;
+    bool slots[2] = {false, false};
+    bool slot_active[2] = {false, false};
+    ListeningStatus listening;
     std::string backend = "pipewire";
     std::string target = "";
     uint32_t sample_rate = 48000;
@@ -117,8 +123,18 @@ public:
     GuiEngineState state;
     bool suppress_events = false;
 
+#include "gui_listening.inc"
+
     explicit CrossfeedGuiApp(bool preview = false) : preview_mode(preview) {
         instance = this;
+        if (!preview) show_comparison = load_comparison_preference();
+        std::error_code library_ec;
+        if (!preview && std::filesystem::exists(UserPresets::path(), library_ec)) {
+            UserPresets::load(UserPresets::path(), user_presets, library_error);
+            for (const auto& preset : user_presets) if (!g_utf8_validate(preset.name.c_str(), -1, nullptr)) {
+                user_presets.clear(); library_error = "Preset library contains an invalid UTF-8 name."; break;
+            }
+        }
         if (preview) {
             const auto& p = g_presets[0];
             state.running = true;
@@ -211,6 +227,23 @@ public:
         if (!adv.empty()) {
             out_state.advanced_effects = (adv == "true" || adv == "1");
         }
+
+        auto number = [&](const char* key, float fallback) {
+            try { const float v = std::stof(parse_json_value(resp, key)); return std::isfinite(v) ? v : fallback; }
+            catch (...) { return fallback; }
+        };
+        out_state.preamp_db = number("preamp_db", 0);
+        out_state.comparison_available = parse_json_value(resp, "bypass_follows_trim") == "true";
+        out_state.slots[0] = parse_json_value(resp, "slot_a") == "true";
+        out_state.slots[1] = parse_json_value(resp, "slot_b") == "true";
+        out_state.slot_active[0] = parse_json_value(resp, "slot_a_active") == "true";
+        out_state.slot_active[1] = parse_json_value(resp, "slot_b_active") == "true";
+        out_state.listening.input_peak = number("input_peak", 0);
+        out_state.listening.output_peak = number("output_peak", 0);
+        out_state.listening.input_hold = number("input_hold", 0);
+        out_state.listening.output_hold = number("output_hold", 0);
+        out_state.listening.input_clip = parse_json_value(resp, "input_clip") == "true";
+        out_state.listening.output_clip = parse_json_value(resp, "output_clip") == "true";
 
         out_state.backend = parse_json_value(resp, "backend");
         out_state.target = parse_json_value(resp, "target");
@@ -370,7 +403,8 @@ public:
            << " trim=" << trm
            << std::setprecision(0)
            << " shadow=" << shd
-           << " advanced=" << (adv ? "1" : "0");
+           << " advanced=" << (adv ? "1" : "0")
+           << std::setprecision(2) << " preamp=" << state.preamp_db;
         std::string resp;
         if (!preview_mode) IpcClient::send_command(Config::get_socket_path(), ss.str(), resp);
     }
@@ -421,7 +455,7 @@ public:
                 sub << " · " << format_friendly_sink_name(state.target);
             }
         } else {
-            sub << "Bypassed (Passthrough)";
+            sub << "Original audio · crossfeed off";
             if (!state.target.empty()) {
                 sub << " · " << format_friendly_sink_name(state.target);
             }
@@ -460,7 +494,8 @@ public:
            << " trim=" << center_trim_db
            << std::setprecision(0)
            << " shadow=" << shadow_hz
-           << " advanced=" << (advanced_effects ? "1" : "0");
+           << " advanced=" << (advanced_effects ? "1" : "0")
+           << std::setprecision(2) << " preamp=" << state.preamp_db;
         std::string resp;
         if (!preview_mode) IpcClient::send_command(Config::get_socket_path(), ss.str(), resp);
         update_ui();
@@ -555,7 +590,7 @@ public:
                 if (state.enabled) {
                     gtk_label_set_text(GTK_LABEL(status_dot_label), preview_mode ? "Preview" : "Active");
                 } else {
-                    gtk_label_set_text(GTK_LABEL(status_dot_label), "Bypassed");
+                    gtk_label_set_text(GTK_LABEL(status_dot_label), "Original audio");
                 }
             }
             if (backend_val_label) {
@@ -607,6 +642,7 @@ public:
             }
         }
 
+        update_listening();
         suppress_events = false;
     }
 
@@ -621,22 +657,8 @@ public:
         if (!app->suppress_events && app->slider_ipc_timeout_id == 0) {
             GuiEngineState new_st;
             app->query_engine_state(new_st);
-            if (new_st.running != app->state.running ||
-                new_st.enabled != app->state.enabled ||
-                new_st.advanced_effects != app->state.advanced_effects ||
-                std::fabs(new_st.level_db - app->state.level_db) > 0.05f ||
-                std::fabs(new_st.freq_hz - app->state.freq_hz) > 1.0f ||
-                std::fabs(new_st.delay_us - app->state.delay_us) > 1.0f ||
-                std::fabs(new_st.phase_apf_hz - app->state.phase_apf_hz) > 5.0f ||
-                std::fabs(new_st.center_trim_db - app->state.center_trim_db) > 0.05f ||
-                std::fabs(new_st.shadow_hz - app->state.shadow_hz) > 10.0f ||
-                new_st.target != app->state.target ||
-                new_st.sample_rate != app->state.sample_rate ||
-                new_st.buffer_frames != app->state.buffer_frames ||
-                new_st.backend != app->state.backend) {
-                app->state = new_st;
-                app->update_ui();
-            }
+            app->state = new_st;
+            app->update_ui();
         }
         return TRUE;
     }
@@ -742,6 +764,9 @@ public:
 
         app->update_preset_and_subtitle();
         app->update_response();
+        app->suppress_events = true;
+        app->update_listening();
+        app->suppress_events = false;
 
         // Debounce IPC write: 30ms
         if (app->slider_ipc_timeout_id == 0) {
@@ -891,7 +916,7 @@ public:
                     );
                     gtk_message_dialog_format_secondary_text(
                         GTK_MESSAGE_DIALOG(msg),
-                        "Could not connect to GitHub. Please verify your internet connection or visit https://github.com/cecep-91/pipewire-crossfeed/releases."
+                        "Could not connect to GitHub. Please verify your internet connection or visit https://github.com/cecep-91/linux-crossfeed/releases."
                     );
                     g_signal_connect(msg, "response", G_CALLBACK(gtk_widget_destroy), nullptr);
                     gtk_widget_show_all(msg);
@@ -935,7 +960,7 @@ public:
 
                     gint res = gtk_dialog_run(GTK_DIALOG(dlg));
                     if (res == GTK_RESPONSE_HELP) {
-                        std::string url = d->release_url.empty() ? "https://github.com/cecep-91/pipewire-crossfeed/releases" : d->release_url;
+                        std::string url = d->release_url.empty() ? "https://github.com/cecep-91/linux-crossfeed/releases" : d->release_url;
                         gtk_show_uri_on_window(a->window ? GTK_WINDOW(a->window) : nullptr, url.c_str(), GDK_CURRENT_TIME, nullptr);
                         gtk_widget_destroy(dlg);
                     } else if (res == GTK_RESPONSE_APPLY) {
@@ -970,7 +995,7 @@ public:
         gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(app->window));
         gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
         gtk_about_dialog_set_program_name(GTK_ABOUT_DIALOG(dialog), "PipeWire Crossfeed");
-        gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(dialog), "2.5.0");
+        gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(dialog), "2.6.0");
         gtk_about_dialog_set_comments(GTK_ABOUT_DIALOG(dialog),
             "Standalone ultra-low-latency headphone crossfeed audio processor.\n"
             "Reduces headphone listening fatigue and spatializes stereo imaging.\n\n"
@@ -983,7 +1008,7 @@ public:
             "Easy Upgrades:\n"
             "• Menu > Check for Updates... (in-app one-click update)\n"
             "• Terminal: 'crossfeed upgrade'");
-        gtk_about_dialog_set_website(GTK_ABOUT_DIALOG(dialog), "https://github.com/cecep-91/pipewire-crossfeed");
+        gtk_about_dialog_set_website(GTK_ABOUT_DIALOG(dialog), "https://github.com/cecep-91/linux-crossfeed");
         gtk_about_dialog_set_website_label(GTK_ABOUT_DIALOG(dialog), "GitHub Repository");
         gtk_about_dialog_set_license_type(GTK_ABOUT_DIALOG(dialog), GTK_LICENSE_MIT_X11);
         gtk_about_dialog_set_logo_icon_name(GTK_ABOUT_DIALOG(dialog), "audio-headphones");
@@ -1238,7 +1263,10 @@ public:
         response_model.set_all_params(state.sample_rate, state.level_db, state.freq_hz,
             state.delay_us, state.phase_apf_hz, state.center_trim_db, state.shadow_hz,
             state.advanced_effects, state.enabled);
-        response_graph.update(response_model.get_params());
+        response_model.set_preamp_db(state.preamp_db);
+        auto graph_params = response_model.get_params();
+        if (!state.comparison_available && !state.enabled) graph_params.trim_linear = 1;
+        response_graph.update(graph_params);
         char caption[80];
         std::snprintf(caption, sizeof(caption), "%s · %.1f kHz", state.enabled ? "Calculated" : "Bypassed", state.sample_rate / 1000.0);
         gtk_label_set_text(GTK_LABEL(response_caption), caption);
@@ -1302,6 +1330,17 @@ public:
         }
         gtk_menu_shell_append(GTK_MENU_SHELL(app_menu), m_presets_item);
 
+        comparison_menu_item = gtk_check_menu_item_new_with_label("Show comparison tools");
+        gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(comparison_menu_item), show_comparison);
+        g_signal_connect(comparison_menu_item, "toggled", G_CALLBACK(+[](GtkCheckMenuItem* item, gpointer data) {
+            auto* app = static_cast<CrossfeedGuiApp*>(data);
+            app->show_comparison = gtk_check_menu_item_get_active(item);
+            gtk_widget_set_visible(app->listening_card, app->show_comparison);
+            if (!app->preview_mode && !save_comparison_preference(app->show_comparison))
+                app->show_listening_error("Could not save this display preference. It will apply until the window is closed.");
+        }), this);
+        gtk_menu_shell_append(GTK_MENU_SHELL(app_menu), comparison_menu_item);
+
         gtk_menu_shell_append(GTK_MENU_SHELL(app_menu), gtk_separator_menu_item_new());
 
         GtkWidget* m_update_item = gtk_menu_item_new_with_label("Check for Updates...");
@@ -1326,11 +1365,11 @@ public:
         // Master bypass switch in header bar
         master_switch = gtk_switch_new();
         gtk_widget_set_valign(master_switch, GTK_ALIGN_CENTER);
-        gtk_widget_set_tooltip_text(master_switch, "Enable crossfeed or bypass for direct passthrough (Ctrl+B).");
+        gtk_widget_set_tooltip_text(master_switch, "Enable crossfeed or hear the original audio (Ctrl+B). Both use the same active output trim and output volume.");
         g_signal_connect(master_switch, "notify::active", G_CALLBACK(on_switch_changed), this);
         atk_object_set_name(gtk_widget_get_accessible(master_switch), "Enable crossfeed");
         enable_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-        gtk_box_pack_start(GTK_BOX(enable_box), make_label("Filter", "dim-label"), FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(enable_box), make_label("Crossfeed", "dim-label"), FALSE, FALSE, 0);
         gtk_box_pack_start(GTK_BOX(enable_box), master_switch, FALSE, FALSE, 0);
         gtk_header_bar_pack_start(GTK_HEADER_BAR(header_bar), enable_box);
 
@@ -1388,7 +1427,9 @@ public:
         preset_desc_label = make_label("", "dim-label");
         add_class(preset_desc_label, "cf-caption");
         gtk_box_pack_start(GTK_BOX(presets), preset_desc_label, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(presets), build_library(), FALSE, FALSE, 0);
         gtk_box_pack_start(GTK_BOX(controls_box), presets, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(controls_box), build_listening(), FALSE, FALSE, 0);
 
         GtkWidget* graph_card = make_card();
         GtkWidget* graph_header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
@@ -1401,7 +1442,7 @@ public:
         response_summary = make_label("", "dim-label");
         add_class(response_summary, "cf-summary");
         gtk_box_pack_start(GTK_BOX(graph_card), response_summary, FALSE, FALSE, 0);
-        gtk_widget_set_tooltip_text(graph_card, "Steady-state frequency response of the filter, not a live audio spectrum. Mono = direct + crossfeed; side = direct − crossfeed. Includes phase, fractional delay and output trim.");
+        gtk_widget_set_tooltip_text(graph_card, "Steady-state frequency response of the filter, not a live audio spectrum. Mono = direct + crossfeed; side = direct − crossfeed. Includes phase, fractional delay, output trim and preamp.");
         gtk_box_pack_start(GTK_BOX(controls_box), graph_card, FALSE, FALSE, 0);
 
         GtkWidget* mix = make_card();
@@ -1492,6 +1533,8 @@ public:
 
         GtkWidget* msg_sub = gtk_label_new("The standalone audio filter engine is currently inactive.\nClick below to start it.");
         gtk_label_set_justify(GTK_LABEL(msg_sub), GTK_JUSTIFY_CENTER);
+        gtk_label_set_line_wrap(GTK_LABEL(msg_sub), TRUE);
+        gtk_label_set_max_width_chars(GTK_LABEL(msg_sub), 38);
         gtk_style_context_add_class(gtk_widget_get_style_context(msg_sub), "dim-label");
         gtk_box_pack_start(GTK_BOX(stopped_box), msg_sub, FALSE, FALSE, 0);
 
@@ -1516,8 +1559,8 @@ public:
             update_ui();
         }
 
-        // Periodic poll every 1000ms
-        if (!preview_mode) poll_timeout_id = g_timeout_add(1000, on_poll_timer, this);
+        // Refresh settings and meter telemetry every 200 ms.
+        if (!preview_mode) poll_timeout_id = g_timeout_add(200, on_poll_timer, this);
     }
 };
 

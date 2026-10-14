@@ -2,7 +2,7 @@
 # scripts/package.sh — Builds .xbps, .deb, and .rpm packages for crossfeed
 set -euo pipefail
 
-VERSION="${VERSION:-2.5.0}"
+VERSION="${VERSION:-2.6.0}"
 PKG_RELEASE="1"
 PKG_NAME="crossfeed"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -73,7 +73,7 @@ build_xbps() {
                 -S "High-performance crossfeed DSP with native GTK3 GUI, system tray, and universal sound server support." \
                 -l "MIT" \
                 -m "crossfeed maintainers" \
-                -H "https://github.com/ikuu/pipewire-crossfeed" \
+                -H "https://github.com/cecep-91/linux-crossfeed" \
                 -D "libpipewire>=0.3.0 libpulseaudio>=15.0 alsa-lib>=1.2.0 gtk+3>=3.24.0 libayatana-appindicator>=0.5.0" \
                 "$build_dir"
 
@@ -100,7 +100,7 @@ build_deb() {
 Package: ${PKG_NAME}
 Version: ${VERSION}-${PKG_RELEASE}
 Architecture: ${DEB_ARCH}
-Maintainer: pipewire-crossfeed <https://github.com/ikuu/pipewire-crossfeed>
+Maintainer: pipewire-crossfeed <https://github.com/cecep-91/linux-crossfeed>
 Section: sound
 Priority: optional
 Installed-Size: $(du -sk "$build_dir/usr" | cut -f1)
@@ -140,7 +140,7 @@ Version:        ${VERSION}
 Release:        ${PKG_RELEASE}%{?dist}
 Summary:        Standalone ultra-low-latency headphone crossfeed audio processor
 License:        MIT
-URL:            https://github.com/ikuu/pipewire-crossfeed
+URL:            https://github.com/cecep-91/linux-crossfeed
 BuildArch:      ${RPM_ARCH}
 AutoReqProv:    yes
 

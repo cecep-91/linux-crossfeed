@@ -84,6 +84,15 @@ bool Config::load_state(ConfigState& state) {
         state.enabled = (val == "true" || val == "1");
     }
 
+    val = extract_val("preamp_db");
+    if (!val.empty()) {
+        try {
+            size_t end = 0;
+            const float value = std::stof(val, &end);
+            if (end == val.size() && std::isfinite(value)) state.preamp_db = std::clamp(value, -24.0f, 12.0f);
+        } catch (...) {}
+    }
+
     val = extract_val("level_db");
     if (!val.empty()) {
         try {
@@ -186,6 +195,7 @@ bool Config::save_state(const ConfigState& state) {
 
     file << "{\n"
          << "  \"enabled\": " << (state.enabled ? "true" : "false") << ",\n"
+         << "  \"preamp_db\": " << state.preamp_db << ",\n"
          << "  \"level_db\": " << state.level_db << ",\n"
          << "  \"freq_hz\": " << state.freq_hz << ",\n"
          << "  \"delay_us\": " << state.delay_us << ",\n"

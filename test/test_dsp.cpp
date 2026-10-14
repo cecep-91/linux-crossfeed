@@ -313,7 +313,7 @@ static void test_crossfeed_dsp_stability() {
         }
     }
 
-    // --- 5. Bypass mode check ---
+    // --- 5. Pure-mode bypass (the loop above ends with effects off) ---
     dsp.set_enabled(false);
     assert(!dsp.is_enabled());
     std::vector<float> test_in(256 * 2, 0.75f);

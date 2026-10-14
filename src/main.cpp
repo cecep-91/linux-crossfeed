@@ -5,6 +5,7 @@
 #include "benchmark.hpp"
 #include "gui.hpp"
 #include "presets.hpp"
+#include "user_presets.hpp"
 #include "shutdown.hpp"
 #include <iostream>
 #include <csignal>
@@ -65,10 +66,13 @@ static void print_help(const char* prog) {
               << "  status            Display engine status and active audio routing\n"
               << "  toggle            Toggle crossfeed filtering on/off (bypass)\n"
               << "  on                Enable crossfeed filtering\n"
-              << "  off               Bypass crossfeed filtering (direct passthrough)\n"
+              << "  off               Bypass crossfeed (active output trim and preamp still apply)\n"
               << "  presets           List available psychoacoustic presets\n"
               << "  preset <name>     Apply a psychoacoustic preset (e.g. meier, chumoy, bs2b, linkwitz, studio)\n"
-              << "  set               Adjust filter parameters live\n"
+              << "  set               Adjust filter parameters live (including --preamp <dB>)\n"
+              << "  ab store a|b      Save current sound to an A/B slot (engine session)\n"
+              << "  ab a|b|dry        Listen to slot A, slot B, or dry audio with the same output trim\n"
+              << "  meters reset      Clear peak holds and clip indicators\n"
               << "  bench             Run DSP throughput and CPU performance benchmark\n"
               << "  upgrade, update   Upgrade crossfeed to the latest release\n"
               << "  check-update      Check if a newer version is available on GitHub\n"
@@ -230,6 +234,8 @@ static int cmd_run(int argc, char** argv) {
         return 1;
     }
 
+    dsp.set_preamp_db(config.preamp_db);
+
     auto backend = create_backend(config.backend);
     if (!backend) {
         std::cerr << "[crossfeed] Error: Failed to create backend '" << config.backend << "'\n";
@@ -388,6 +394,8 @@ static int cmd_status(bool json_output) {
               << "  Phase All-Pass: " << (phs.empty() ? "1500" : phs) << " Hz\n"
               << "  Center Trim:    " << (trm.empty() ? "-1.5" : trm) << " dB\n"
               << "  Head Shadow:    " << (shd.empty() ? "3000" : shd) << " Hz\n"
+              << "  Preamp:         " << get_field("preamp_db") << " dB\n"
+              << "  Bypass trim:    " << (get_field("bypass_follows_trim") == "true" ? "Follows active output trim" : "Not reported by engine") << "\n"
               << "  Backend:        " << bk << "\n"
               << "  Output Sink:    " << tgt << "\n"
               << "  Sample Rate:    " << sr << " Hz\n"
@@ -455,6 +463,10 @@ static int cmd_set(int argc, char** argv) {
             float val;
             if (!parse_cli_float(arg, argv[++i], val)) return 1;
             cmd += " phase=" + std::string(argv[i]);
+        } else if (arg == "--preamp") {
+            float value;
+            if (i + 1 >= argc || !parse_cli_float(arg, argv[++i], value)) return 1;
+            cmd += " preamp=" + std::string(argv[i]);
         } else if (arg == "--trim") {
             if (i + 1 >= argc) {
                 std::cerr << "[crossfeed] Error: Option " << arg << " requires an argument.\n";
@@ -509,6 +521,7 @@ static int cmd_set(int argc, char** argv) {
         std::cerr << "Error: Crossfeed engine is not running.\n";
         return 1;
     }
+    if (resp.find("\"error\"") != std::string::npos) { std::cerr << resp << "\n"; return 1; }
     std::cout << "Settings applied successfully.\n";
     return cmd_status(false);
 }
@@ -526,6 +539,13 @@ static int cmd_presets() {
                   << "Delay: " << p.delay_us << " µs | "
                   << "APF: " << p.phase_apf_hz << " Hz\n\n";
     }
+    std::vector<UserPreset> saved;
+    std::string library_error;
+    if (UserPresets::load(UserPresets::path(), saved, library_error) && !saved.empty()) {
+        std::cout << "Saved user presets (exact names):\n";
+        for (const auto& entry : saved) std::cout << "  " << entry.name << "\n";
+        std::cout << '\n';
+    }
     std::cout << "Usage:\n"
               << "  crossfeed preset <name>    Apply preset live or save to configuration\n"
               << "=================================================================\n";
@@ -539,6 +559,27 @@ static int cmd_preset(int argc, char** argv) {
         return 1;
     }
     std::string name = argv[2];
+    std::vector<UserPreset> saved;
+    std::string library_error;
+    if (UserPresets::load(UserPresets::path(), saved, library_error)) for (const auto& entry : saved) {
+        if (entry.name != name) continue;
+        const auto& p = entry.params;
+        std::ostringstream command; command.imbue(std::locale::classic()); command << std::setprecision(9);
+        command << "SET level=" << p.level_db << " freq=" << p.freq_hz << " delay=" << p.delay_us
+                << " phase=" << p.phase_apf_hz << " trim=" << p.center_trim_db << " shadow=" << p.shadow_hz
+                << " advanced=" << int(p.advanced_effects) << " preamp=" << p.preamp_db;
+        std::string response;
+        if (IpcClient::send_command(Config::get_socket_path(), command.str(), response)) {
+            if (response.find("\"error\"") != std::string::npos) { std::cerr << response << '\n'; return 1; }
+            return cmd_status(false);
+        }
+        ConfigState cfg; Config::load_state(cfg);
+        cfg.level_db = p.level_db; cfg.freq_hz = p.freq_hz; cfg.delay_us = p.delay_us;
+        cfg.phase_apf_hz = p.phase_apf_hz; cfg.center_trim_db = p.center_trim_db;
+        cfg.shadow_hz = p.shadow_hz; cfg.advanced_effects = p.advanced_effects; cfg.preamp_db = p.preamp_db;
+        if (!Config::save_state(cfg)) { std::cerr << "Could not save preset settings.\n"; return 1; }
+        std::cout << "Engine is stopped. Saved preset '" << name << "' to configuration.\n"; return 0;
+    }
     const auto* p = find_preset(name);
     if (!p) {
         std::cerr << "Error: Unknown preset '" << name << "'.\n\n";
@@ -614,7 +655,7 @@ static int cmd_update(int argc, char** argv, bool check_only) {
     if (!script_path.empty()) {
         cmd = "\"" + script_path + "\"" + args;
     } else {
-        cmd = "curl -fsSL https://raw.githubusercontent.com/cecep-91/pipewire-crossfeed/development/scripts/update.sh | bash -s --" + args;
+        cmd = "curl -fsSL https://raw.githubusercontent.com/cecep-91/linux-crossfeed/development/scripts/update.sh | bash -s --" + args;
     }
 
     int ret = system(cmd.c_str());
@@ -657,6 +698,22 @@ int main(int argc, char** argv) {
         return cmd_preset(argc, argv);
     } else if (cmd == "set") {
         return cmd_set(argc, argv);
+    } else if (cmd == "ab" || cmd == "meters") {
+        std::string request;
+        const std::string action = argc > 2 ? argv[2] : "";
+        if (cmd == "ab" && argc == 3 && (action == "a" || action == "b" || action == "dry")) {
+            request = action == "a" ? "AB A" : action == "b" ? "AB B" : "AB DRY";
+        } else if (cmd == "ab" && argc == 4 && action == "store" &&
+                   (std::string(argv[3]) == "a" || std::string(argv[3]) == "b")) {
+            request = std::string(argv[3]) == "a" ? "AB STORE A" : "AB STORE B";
+        } else if (cmd == "meters" && argc == 3 && action == "reset") request = "METERS RESET";
+        else { std::cerr << "Usage: crossfeed ab store a|b; ab a|b|dry; meters reset\n"; return 1; }
+        std::string response;
+        if (!IpcClient::send_command(Config::get_socket_path(), request, response)) {
+            std::cerr << "Crossfeed engine is not running.\n"; return 1;
+        }
+        std::cout << response << '\n';
+        return response.find("\"error\"") == std::string::npos ? 0 : 1;
     } else if (cmd == "upgrade" || cmd == "update") {
         return cmd_update(argc, argv, false);
     } else if (cmd == "check-update" || cmd == "check") {
@@ -665,7 +722,7 @@ int main(int argc, char** argv) {
         run_benchmark();
         return 0;
     } else if (cmd == "--version" || cmd == "-v") {
-        std::cout << "pipewire-crossfeed 2.5.0 (standalone)\n";
+        std::cout << "pipewire-crossfeed 2.6.0 (standalone)\n";
         return 0;
     } else if (cmd == "help" || cmd == "--help" || cmd == "-h") {
         print_help(argv[0]);

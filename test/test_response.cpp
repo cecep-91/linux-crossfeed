@@ -34,8 +34,9 @@ int main() {
                 }
                 auto bypass = params;
                 bypass.enabled = false;
-                assert(response_at(bypass, 410).mono_db() == 0);
-                assert(response_at(bypass, 410).side_db() == 0);
+                const double trim = advanced ? params.center_trim_db : 0;
+                assert(std::abs(response_at(bypass, 410).mono_db() - trim) < 1e-5);
+                assert(std::abs(response_at(bypass, 410).side_db() - trim) < 1e-5);
             }
         }
     }

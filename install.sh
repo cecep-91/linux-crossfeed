@@ -27,9 +27,9 @@ if [ -z "$SRC_DIR" ] || [ ! -f "$SRC_DIR/data/crossfeed.desktop" ]; then
 
     echo "==> Fetching latest release installer from GitHub..."
     if have curl; then
-        curl -fsSL https://github.com/cecep-91/pipewire-crossfeed/archive/refs/heads/development.tar.gz -o "$TMP_SRC/source.tar.gz"
+        curl -fsSL https://github.com/cecep-91/linux-crossfeed/archive/refs/heads/development.tar.gz -o "$TMP_SRC/source.tar.gz"
     elif have wget; then
-        wget -q https://github.com/cecep-91/pipewire-crossfeed/archive/refs/heads/development.tar.gz -O "$TMP_SRC/source.tar.gz"
+        wget -q https://github.com/cecep-91/linux-crossfeed/archive/refs/heads/development.tar.gz -O "$TMP_SRC/source.tar.gz"
     else
         echo "error: Neither curl nor wget found." >&2
         exit 1
@@ -111,7 +111,7 @@ case "${1-}" in
         elif [ -x "$PKG_DATA_DIR/update.sh" ]; then
             exec "$PKG_DATA_DIR/update.sh"
         elif have curl; then
-            exec curl -fsSL https://raw.githubusercontent.com/cecep-91/pipewire-crossfeed/development/scripts/update.sh | bash
+            exec curl -fsSL https://raw.githubusercontent.com/cecep-91/linux-crossfeed/development/scripts/update.sh | bash
         fi
         exit 0
         ;;

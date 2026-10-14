@@ -59,6 +59,19 @@ int main() {
     assert(send("PRESET meier").find("Jan Meier") != std::string::npos);
     assert(dsp.get_params().generation == before.generation + 1);
     assert(send("STATUS").find("1024") != std::string::npos);
+    assert(send("SET preamp=nan level=-20").find("error") != std::string::npos);
+    assert(send("SET preamp=-6").find("error") == std::string::npos);
+    assert(dsp.get_params().preamp_db == -6);
+    assert(send("AB A").find("empty_slot") != std::string::npos);
+    assert(send("AB STORE A").find("\"slot_a\": true") != std::string::npos);
+    send("SET level=-20");
+    assert(send("AB A").find("error") == std::string::npos);
+    assert(dsp.get_level_db() == -9.5f);
+    assert(send("AB DRY").find("\"enabled\": false") != std::string::npos);
+    assert(send("STATUS").find("\"bypass_follows_trim\": true") != std::string::npos);
+    ConfigState saved;
+    assert(Config::load_state(saved) && saved.preamp_db == -6);
+    assert(send("METERS RESET").find("error") == std::string::npos);
     for (int i = 0; i < 4; ++i) assert(send("STOP").find("stopping") != std::string::npos);
     assert(backend.stopped.load());
     server.stop(); // Joins the response thread; no detached callback remains.

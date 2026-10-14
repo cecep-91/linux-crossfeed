@@ -120,6 +120,9 @@ static std::string build_status_json(CrossfeedDSP* dsp, AudioBackend* backend) {
         params.advanced_effects
     );
 
+    const auto listening = dsp->get_listening_status();
+    FilterParams a, b;
+    const bool slot_a = dsp->get_slot(0, a), slot_b = dsp->get_slot(1, b);
     std::ostringstream ss;
     ss << "{\n"
        << "  \"status\": \"" << (backend && backend->is_running() ? "running" : "stopped") << "\",\n"
@@ -141,7 +144,21 @@ static std::string build_status_json(CrossfeedDSP* dsp, AudioBackend* backend) {
        << "  \"backend\": \"" << (backend ? backend->get_backend_name() : "unknown") << "\",\n"
        << "  \"target\": \"" << (backend ? backend->get_active_target() : "") << "\",\n"
        << "  \"sample_rate\": " << (backend ? backend->get_sample_rate() : 48000) << ",\n"
-       << "  \"buffer_frames\": " << (backend ? backend->get_buffer_frames() : 256) << "\n"
+       << "  \"buffer_frames\": " << (backend ? backend->get_buffer_frames() : 256) << ",\n"
+       << std::setprecision(2)
+       << "  \"preamp_db\": " << params.preamp_db << ",\n"
+       << "  \"bypass_follows_trim\": true,\n"
+       << "  \"slot_a\": " << (slot_a ? "true" : "false") << ",\n"
+       << "  \"slot_b\": " << (slot_b ? "true" : "false") << ",\n"
+       << "  \"slot_a_active\": " << (params.enabled && slot_a && CrossfeedDSP::same_sound(params, a) ? "true" : "false") << ",\n"
+       << "  \"slot_b_active\": " << (params.enabled && slot_b && CrossfeedDSP::same_sound(params, b) ? "true" : "false") << ",\n"
+       << std::setprecision(6)
+       << "  \"input_peak\": " << listening.input_peak << ",\n"
+       << "  \"output_peak\": " << listening.output_peak << ",\n"
+       << "  \"input_hold\": " << listening.input_hold << ",\n"
+       << "  \"output_hold\": " << listening.output_hold << ",\n"
+       << "  \"input_clip\": " << (listening.input_clip ? "true" : "false") << ",\n"
+       << "  \"output_clip\": " << (listening.output_clip ? "true" : "false") << "\n"
        << "}";
     return ss.str();
 }
@@ -205,6 +222,7 @@ std::string IpcServer::handle_command(const std::string& cmd) {
             else if (k == "delay" || k == "delay_us") field = &params.delay_us;
             else if (k == "phase" || k == "phase_apf_hz" || k == "phase_hz") field = &params.phase_apf_hz;
             else if (k == "trim" || k == "center_trim_db" || k == "trim_db") field = &params.center_trim_db;
+            else if (k == "preamp" || k == "preamp_db") field = &params.preamp_db;
             else if (k == "shadow" || k == "shadow_hz") field = &params.shadow_hz;
             if (field) {
                 try {
@@ -225,9 +243,7 @@ std::string IpcServer::handle_command(const std::string& cmd) {
             changed = true;
         }
         if (changed) {
-            if (!dsp_->set_all_params(params.sample_rate, params.level_db, params.freq_hz,
-                params.delay_us, params.phase_apf_hz, params.center_trim_db,
-                params.shadow_hz, params.advanced_effects, params.enabled))
+            if (!dsp_->set_snapshot(params))
                 return "{\"error\":\"invalid_parameters\"}";
             params = dsp_->get_params();
             config_->enabled = params.enabled;
@@ -238,8 +254,25 @@ std::string IpcServer::handle_command(const std::string& cmd) {
             config_->phase_apf_hz = params.phase_apf_hz;
             config_->center_trim_db = params.center_trim_db;
             config_->shadow_hz = params.shadow_hz;
+            config_->preamp_db = params.preamp_db;
             Config::save_state(*config_);
         }
+        return build_status_json(dsp_, backend_);
+    } else if (cmd == "AB STORE A" || cmd == "AB STORE B") {
+        dsp_->store_slot(cmd.back() == 'A' ? 0 : 1);
+        return build_status_json(dsp_, backend_);
+    } else if (cmd == "AB A" || cmd == "AB B" || cmd == "AB DRY") {
+        if (cmd == "AB DRY") dsp_->set_enabled(false);
+        else if (!dsp_->recall_slot(cmd.back() == 'A' ? 0 : 1)) return "{\"error\":\"empty_slot\"}";
+        const auto p = dsp_->get_params();
+        config_->enabled = p.enabled; config_->advanced_effects = p.advanced_effects;
+        config_->level_db = p.level_db; config_->freq_hz = p.freq_hz;
+        config_->delay_us = p.delay_us; config_->phase_apf_hz = p.phase_apf_hz;
+        config_->center_trim_db = p.center_trim_db; config_->shadow_hz = p.shadow_hz;
+        Config::save_state(*config_);
+        return build_status_json(dsp_, backend_);
+    } else if (cmd == "METERS RESET") {
+        dsp_->reset_meters();
         return build_status_json(dsp_, backend_);
     } else if (cmd == "STOP") {
         // stop() only requests cancellation. The processing owner tears down;

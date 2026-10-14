@@ -3,8 +3,8 @@
   <h1>Crossfeed</h1>
   <p><strong>Headphone crossfeed for Linux, with a native GTK interface and an interactive response graph.</strong></p>
   <p>
-    <a href="https://github.com/cecep-91/pipewire-crossfeed/releases/latest"><img src="https://img.shields.io/github/v/release/cecep-91/pipewire-crossfeed?color=blue&label=Release" alt="Latest release" /></a>
-    <a href="https://github.com/cecep-91/pipewire-crossfeed/actions/workflows/ci.yml"><img src="https://github.com/cecep-91/pipewire-crossfeed/actions/workflows/ci.yml/badge.svg?branch=development" alt="CI status" /></a>
+    <a href="https://github.com/cecep-91/linux-crossfeed/releases/latest"><img src="https://img.shields.io/github/v/release/cecep-91/linux-crossfeed?color=blue&label=Release" alt="Latest release" /></a>
+    <a href="https://github.com/cecep-91/linux-crossfeed/actions/workflows/ci.yml"><img src="https://github.com/cecep-91/linux-crossfeed/actions/workflows/ci.yml/badge.svg?branch=development" alt="CI status" /></a>
     <img src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=c%2B%2B" alt="C++17" />
     <img src="https://img.shields.io/badge/Audio-PipeWire%20%7C%20PulseAudio%20%7C%20ALSA-informational" alt="Audio backends" />
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT license" /></a>
@@ -14,35 +14,35 @@
 
 Crossfeed blends a filtered portion of each stereo channel into the opposite ear, reducing extreme left/right separation in headphone listening. One C++17 executable provides the audio engine, GTK3 controls, tray menu, and CLI, with PipeWire, PulseAudio, and ALSA backends.
 
-**Version 2.5.0** adds a redesigned interface, theme-aware panels, a responsive layout, and a mono/side frequency-response graph. See the [release notes](RELEASE_NOTES.md) or [download the release](https://github.com/cecep-91/pipewire-crossfeed/releases/tag/v2.5.0).
+**Version 2.6.0** adds optional dry/A/B comparisons with shared output trim, saved user presets, and peak meters with a shared preamp. The comparison tools are hidden by default; enable **Menu → Show comparison tools** when you need them. See the [release notes](RELEASE_NOTES.md) or [download the release](https://github.com/cecep-91/linux-crossfeed/releases/tag/v2.6.0).
 
 | Adwaita · light | Breeze · dark |
 | --- | --- |
 | [![Crossfeed with Adwaita, showing presets, the response graph, and tuning controls](data/screenshots/adwaita.png)](data/screenshots/adwaita.png) | [![Crossfeed with KDE's Breeze GTK theme in dark mode](data/screenshots/breeze-dark.png)](data/screenshots/breeze-dark.png) |
 
-Actual screenshots of the compiled application in disconnected preview mode. The interface was checked with Adwaita and Breeze in light/dark variants, plus HighContrast. Fonts, controls, and colors follow the active GTK theme; KDE styling uses the installed Breeze GTK theme.
+Actual screenshots in disconnected preview mode. The interface was checked with Adwaita and Breeze in light/dark variants, plus HighContrast. Fonts, controls, and colors follow the active GTK theme; KDE styling uses the installed Breeze GTK theme.
 
 ## Install
 
 ### Release packages
 
-Download the package for your system from [GitHub Releases](https://github.com/cecep-91/pipewire-crossfeed/releases/latest). Release binaries are currently built for Linux **x86_64**. Run the appropriate command from the directory containing your download:
+Download the package for your system from [GitHub Releases](https://github.com/cecep-91/linux-crossfeed/releases/latest). Release binaries are currently built for Linux **x86_64**. Run the appropriate command from the directory containing your download:
 
 ```sh
 # Debian / Ubuntu
-sudo apt install ./crossfeed_2.5.0-1_amd64.deb
+sudo apt install ./crossfeed_2.6.0-1_amd64.deb
 
 # Fedora
-sudo dnf install ./crossfeed-2.5.0-1.x86_64.rpm
+sudo dnf install ./crossfeed-2.6.0-1.x86_64.rpm
 
 # Void Linux: index the downloaded XBPS package as a local repository
-xbps-rindex -a ./crossfeed-2.5.0_1.x86_64.xbps
+xbps-rindex -a ./crossfeed-2.6.0_1.x86_64.xbps
 sudo xbps-install -R . crossfeed
 ```
 
-Packages install the binary under `/usr/bin`, along with a desktop launcher, icon, and license. On Fedora systems using rpm-ostree, the RPM can be layered with `rpm-ostree install ./crossfeed-2.5.0-1.x86_64.rpm`.
+Packages install the binary under `/usr/bin`, along with a desktop launcher, icon, and license. On Fedora systems using rpm-ostree, the RPM can be layered with `rpm-ostree install ./crossfeed-2.6.0-1.x86_64.rpm`.
 
-For a per-user installation, download and extract `pipewire-crossfeed-2.5.0-linux-x86_64.tar.gz`, then run `./install.sh` inside the extracted directory. It installs to `~/.local/bin` and `~/.local/share`; make sure `~/.local/bin` is on your shell's `PATH`. The user desktop launcher points directly to this installation, even if an older system package is also present.
+For a per-user installation, download and extract `pipewire-crossfeed-2.6.0-linux-x86_64.tar.gz`, then run `./install.sh` inside the extracted directory. It installs to `~/.local/bin` and `~/.local/share`; make sure `~/.local/bin` is on your shell's `PATH`. The user desktop launcher points directly to this installation, even if an older system package is also present.
 
 The binary links to GTK3, Ayatana AppIndicator, and the audio-backend libraries; the tarball is not a static build. Native PipeWire routing also uses `pw-link` and `pactl`, including a reachable PulseAudio-compatible server to create the virtual sink.
 
@@ -58,8 +58,8 @@ You need a C++17 compiler, Make, pkg-config, and the development headers for the
 | Arch Linux | `sudo pacman -S --needed base-devel pipewire libpulse alsa-lib gtk3 libayatana-appindicator` |
 
 ```sh
-git clone https://github.com/cecep-91/pipewire-crossfeed.git
-cd pipewire-crossfeed
+git clone https://github.com/cecep-91/linux-crossfeed.git
+cd linux-crossfeed
 make -j"$(nproc)"
 ./install.sh
 ```
@@ -79,14 +79,31 @@ Normal GUI/engine operation changes audio routing to feed the crossfeed processo
 
 ## Using the GUI
 
-- **Filter switch:** enable processing or compare with bypass. Controls remain available while bypassed.
-- **Listening presets:** choose Jan Meier, Chu Moy, Bauer BS2B, Linkwitz, or Studio 30°. The reset button restores default settings.
+- **Crossfeed switch:** turn crossfeed on or listen to the original audio. Controls remain available while crossfeed is off; the active output trim and shared output volume still apply.
+- **Listening presets:** choose Jan Meier, Chu Moy, Bauer BS2B, Linkwitz, or Studio 30°. Expand **My presets** and choose **Save current…** to keep your settings or **Use preset** to recall them. **More…** contains rename, duplicate, delete, import, and export. The reset button restores the built-in filter defaults.
+- **Optional comparison tools:** enable **Menu → Show comparison tools** to reveal the entire **Hear the difference** card, including Original audio / With crossfeed, A/B slots, output volume, and meters. It is hidden by default.
 - **Frequency response:** see how the current settings affect mono and side signals. Hover for frequency and gain values.
 - **Crossfeed blend and crossover:** adjust how much reaches the opposite ear and the upper range of that blend. Spin boxes provide numeric entry; double-click a slider to reset it.
 - **Spatial effects:** turn on delay, phase rotation, head shadow, and output trim, or turn them off for Pure crossfeed. Expand **Fine-tune spatial effects** to adjust each stage.
 - **Output and buffer/quantum:** inspect the selected device, backend, negotiated rate, and block size. Block duration is not total audio latency.
 
 Presets wrap and tuning controls move into one column on smaller windows. Scrolling over sliders or spin boxes scrolls the view instead of changing their values.
+
+### Compare with the same output trim
+
+1. Open the app menu (☰) and enable **Show comparison tools**. The whole card is hidden by default; this display preference is remembered in `gui.ini` beside the engine settings. Preview mode keeps the choice temporary.
+2. Choose **Original audio** or **With crossfeed**. Both use the selected preset's active output-trim gain: with −2 dB trim, original audio also gets −2 dB. There is no measurement or calibration wait.
+3. To compare two presets or adjustments, expand **Compare two settings (optional)**. Configure the first and choose **Save current as A**, then configure the second and choose **Save current as B**. Use **Listen to A** and **Listen to B** to switch. Original audio follows the last selected setting's trim.
+
+![Optional comparison tools showing shared output trim](data/screenshots/listening.png)
+
+The same trim applies whether you select Original audio here or bypass using the header switch, shortcut, tray, or CLI. Advanced mode applies the configured output trim to both paths. Pure mode bypasses that trim stage on both paths. The additional **Output volume** preamp also applies equally to both. For example, −2 dB trim plus −3 dB preamp gives −5 dB total gain on the original audio. Ordinary changes and bypass transitions remain smoothed.
+
+This copies the output gain setting; it does not measure or normalize perceived loudness. Crossfeed can still change the signal's energy because it blends and filters the channels. A/B slots retain their own trim settings and last for the engine session. Use **My presets** to keep settings between sessions. Showing or hiding the comparison card does not change playback.
+
+Expand **Volume & meters** inside the optional card for **Output volume** and input/output sample-peak meters. Peak holds and clipping flags remain until **Clear peak readings**. Lower Output volume if the output clips. The meters do not measure inter-sample true peaks. For unscaled dry audio, set active output trim and Output volume to 0 dB (or use Pure mode with 0 dB Output volume).
+
+User presets include filter settings and preamp, and are stored in `presets.crossfeed` beside `state.json`. Export writes the selected preset; import validates the complete file and gives duplicate names a suffix. The portable text format is versioned, limited to 128 presets and 64 KiB, and saved atomically. Preview-mode presets are temporary and import/export is disabled.
 
 ### Reading the graph
 
@@ -95,9 +112,9 @@ Presets wrap and tuning controls move into one column on smaller windows. Scroll
 | **Solid — Mono (L + R)** | Direct + crossfeed: the response to identical left and right inputs |
 | **Dashed — Side (L − R)** | Direct − crossfeed: the response to opposite-polarity left and right inputs |
 
-The graph is a **calculated steady-state filter response**, not a live spectrum analyzer. It updates with sliders, presets, effects mode, bypass, and reported sample rate. It uses the DSP's prepared coefficients and includes phase, the linear fractional delay, and output trim. Bypass displays a flat 0 dB response. At lower sample rates, the graph stops below Nyquist.
+The graph is a **calculated steady-state filter response**, not a live spectrum analyzer. It updates with sliders, presets, effects mode, bypass, and reported sample rate. It uses the DSP's prepared coefficients and includes phase, the linear fractional delay, output trim and preamp. Dry audio displays a flat response at its applied gain; it is 0 dB only when no attenuation or preamp is applied. At lower sample rates, the graph stops below Nyquist.
 
-The DC readouts describe only the response at zero frequency. A near-flat DC value does not imply a flat response across the audible band: the existing Meier advanced preset, for example, has a mono dip of roughly **−5.6 dB near 410 Hz at 48 kHz**. The graph makes this behavior visible; version 2.5.0 preserves the existing preset voicing.
+The DC readouts describe only the response at zero frequency. A near-flat DC value does not imply a flat response across the audible band: the existing Meier advanced preset, for example, has a mono dip of roughly **−5.6 dB near 410 Hz at 48 kHz**. The graph makes this behavior visible; this release preserves the existing processed preset voicing.
 
 ### Keyboard and tray controls
 
@@ -134,6 +151,18 @@ crossfeed set --pure
 crossfeed set --effects
 crossfeed set --level -12 --freq 650 --delay 280 --phase 1500
 crossfeed set --trim -1.5 --shadow 3200
+crossfeed set --preamp -3
+crossfeed preset "My preset"  # Exact name from the saved preset library
+
+# Optional A/B listening (engine must be running)
+crossfeed ab store a
+crossfeed preset chumoy
+crossfeed ab store b
+crossfeed status --json      # Includes trim, A/B slots, and peak holds
+crossfeed ab a
+crossfeed ab b
+crossfeed ab dry             # Follows the selected setting's active trim
+crossfeed meters reset
 
 # Offline computation benchmark and command reference
 crossfeed bench
@@ -193,7 +222,7 @@ From a source checkout, `make update` or `./install.sh --update` runs the update
 
 ```sh
 make -j4
-make test test-rt test-routing
+make test test-rt test-routing test-cli
 make test-sanitize
 make test-tsan
 make bench
@@ -205,13 +234,16 @@ GTK_THEME=Adwaita:dark xvfb-run -a make test-gui
 
 | Check | Coverage |
 | --- | --- |
-| `make test` | DSP regressions, isolated IPC/shutdown tests, and graph-model agreement with processed impulses across all presets, both modes, and 8–192 kHz |
+| `make test` | DSP/IPC regressions, graph-model agreement, shared dry/processed output trim, preset serialization, peak holds, and concurrent telemetry |
 | `make test-rt` | Instrumented processing checks for C++ allocations and pthread mutex locks |
+| `make test-cli` | Saved user-preset recall and listening commands against an isolated fake engine |
 | `make test-routing` | Native startup failure with fake routing commands and an isolated runtime directory |
 | `make test-sanitize` | Address, undefined-behavior, float-cast-overflow, and leak checks |
 | `make test-tsan` | DSP and IPC thread-race checks |
 | `make test-gui` | Actual GTK controls in disconnected preview mode: switches, graph updates, presets, rate bounds, narrow layout, and stopped state |
-| `make bench` | Offline callback computation time for steady input, decaying silence, and parameter changes |
+| `make bench` | Offline callback computation time for steady input, decaying silence, parameter changes, A/B recalls, and bypass |
+
+Listening tests verify that dry samples follow the active trim and shared preamp at 8–192 kHz, and that processed samples use the same trim multiplier. They cover Advanced/Pure modes, planar/interleaved processing, smoothed trim changes, A/B recall, rate fallback/recovery, graph agreement, clipping, preset storage, and concurrent control/telemetry. GUI tests verify the hidden-by-default menu option, preference persistence, preview isolation, and narrow layouts.
 
 Core tests do not require GTK development headers. IPC tests require local Unix socket permissions; routing tests require Python 3 and the full application build. Sanitizer targets need the compiler's matching runtime/development packages. GTK tests require a display or Xvfb and write screenshots to `/tmp/crossfeed-gui-preview`. Other installed themes can be tested with `GTK_THEME=Breeze`, `GTK_THEME=Breeze-Dark`, or `GTK_THEME=HighContrast`.
 

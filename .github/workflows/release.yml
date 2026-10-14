@@ -35,7 +35,7 @@ jobs:
           PKG="pipewire-crossfeed-$VERSION-linux-x86_64"
           mkdir -p "$PKG/bin" "$PKG/data" "$PKG/scripts"
           cp bin/crossfeed "$PKG/bin/"
-          cp data/* "$PKG/data/"
+          cp -R data/. "$PKG/data/"
           cp scripts/* "$PKG/scripts/" 2>/dev/null || true
           cp install.sh Makefile README.md LICENSE "$PKG/"
           tar czf "dist/$PKG.tar.gz" "$PKG"

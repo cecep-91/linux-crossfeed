@@ -115,6 +115,8 @@ struct FilterParams {
     float shadow_hz = DEFAULT_SHADOW_HZ;
     bool advanced_effects = true;
     bool enabled = true;
+    float preamp_db = 0.0f;
+    float preamp_linear = 1.0f;
 
     BiquadCoeffs dir_coeffs;
     BiquadCoeffs cross_coeffs;
@@ -126,6 +128,12 @@ struct FilterParams {
     float delay_samples = 13.44f;
 };
 
+struct ListeningStatus {
+    float input_peak = 0, output_peak = 0;
+    float input_hold = 0, output_hold = 0;
+    bool input_clip = false, output_clip = false;
+};
+
 class CrossfeedDSP {
 public:
     CrossfeedDSP();
@@ -134,6 +142,15 @@ public:
     bool set_all_params(float sample_rate, float level_db, float freq_hz,
                         float delay_us, float phase_apf_hz, float center_trim_db,
                         float shadow_hz, bool advanced_effects, bool enabled);
+
+    bool set_snapshot(FilterParams params);
+    bool set_preamp_db(float value);
+    void reset_meters();
+    bool store_slot(unsigned slot);
+    bool recall_slot(unsigned slot);
+    bool get_slot(unsigned slot, FilterParams& params) const;
+    ListeningStatus get_listening_status() const;
+    static bool same_sound(const FilterParams& a, const FilterParams& b) noexcept;
 
     bool set_level_db(float level_db);
     bool set_freq_hz(float freq_hz);
@@ -184,7 +201,13 @@ private:
     // Three owners: writer, atomic exchange slot, reader. Writers serialize;
     // exactly one audio thread may call either process method at a time.
     static constexpr unsigned DIRTY = 4;
-    FilterParams param_buffers_[3];
+    struct ControlSnapshot {
+        FilterParams current, slots[2];
+        bool valid[2] = {false, false};
+        uint64_t meter_reset = 0;
+    };
+    ControlSnapshot param_buffers_[3], control_snapshot_, pending_snapshot_;
+
     FilterParams control_params_;
     unsigned write_idx_ = 0; // Protected by write_mutex_.
     unsigned read_idx_ = 1;  // Audio thread only.
@@ -214,6 +237,19 @@ private:
     unsigned fade_length_ = 1;
     bool started_ = false;
     bool awaiting_rate_ = false;
+
+    uint64_t meter_revision_ = 0;
+    ListeningStatus meters_;
+    float block_input_peak_ = 0, block_output_peak_ = 0;
+    void meter_sample(float l, float r, float out_l, float out_r) noexcept;
+    void publish_meters() noexcept;
+    // Inverse triple buffer: RT writer, serialized non-RT telemetry readers.
+    mutable ListeningStatus meter_buffers_[3];
+    unsigned meter_write_ = 0;
+    mutable unsigned meter_read_ = 1;
+    mutable std::atomic<unsigned> meter_exchange_{2};
+    mutable std::mutex meter_read_mutex_;
+
 };
 
 } // namespace crossfeed

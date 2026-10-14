@@ -75,15 +75,26 @@ bin:
 TEST_TARGET = bin/test_dsp
 TEST_SRCS = test/test_dsp.cpp src/dsp.cpp src/config.cpp
 
-test: $(TEST_TARGET) bin/test_ipc bin/test_response
+test: $(TEST_TARGET) bin/test_ipc bin/test_response bin/test_listening
 	./$(TEST_TARGET)
 	./bin/test_ipc
 	./bin/test_response
+	./bin/test_listening
+
+
+bin/test_listening: test/test_listening.cpp src/dsp.cpp src/config.cpp $(wildcard src/*.hpp) Makefile | bin
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -Isrc test/test_listening.cpp src/dsp.cpp src/config.cpp -o $@
+
+bin/test_listening_sanitize: test/test_listening.cpp src/dsp.cpp src/config.cpp $(wildcard src/*.hpp) Makefile | bin
+	$(CXX) -O1 -g -std=c++17 -Wall -Wextra -pthread -fsanitize=address,undefined,float-cast-overflow -fno-omit-frame-pointer -Isrc test/test_listening.cpp src/dsp.cpp src/config.cpp -o $@
+
+bin/test_listening_tsan: test/test_listening.cpp src/dsp.cpp src/config.cpp $(wildcard src/*.hpp) Makefile | bin
+	$(CXX) -O1 -g -std=c++17 -Wall -Wextra -pthread -fsanitize=thread -fno-omit-frame-pointer -Isrc test/test_listening.cpp src/dsp.cpp src/config.cpp -o $@
 
 bin/test_response: test/test_response.cpp src/dsp.cpp src/dsp.hpp src/response.hpp src/presets.hpp src/audio_math.hpp Makefile | bin
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -Isrc test/test_response.cpp src/dsp.cpp -o $@
 
-bin/test_gui: test/test_gui.cpp src/gui.cpp src/ipc.cpp src/dsp.cpp src/config.cpp $(wildcard src/*.hpp) Makefile | bin
+bin/test_gui: test/test_gui.cpp src/gui.cpp src/gui_listening.inc src/ipc.cpp src/dsp.cpp src/config.cpp $(wildcard src/*.hpp) Makefile | bin
 	$(CXX) $(CXXFLAGS) $(GTK_CFLAGS) $(LDFLAGS) -Isrc test/test_gui.cpp src/ipc.cpp src/dsp.cpp src/config.cpp $(GTK_LIBS) -o $@
 
 # Use xvfb-run -a make test-gui on a headless machine. Preview mode never
@@ -101,7 +112,10 @@ bin/test_rt: test/test_rt.cpp src/dsp.cpp src/dsp.hpp src/audio_math.hpp Makefil
 test-rt: bin/test_rt
 	./bin/test_rt
 
-.PHONY: test-routing
+.PHONY: test-routing test-cli
+test-cli: $(TARGET)
+	python3 test/test_cli.py
+
 test-routing: $(TARGET)
 	python3 test/test_pipewire_lifecycle.py
 
@@ -114,9 +128,10 @@ bin/test_dsp_tsan: $(TEST_SRCS) $(wildcard src/*.hpp) Makefile | bin
 bin/test_ipc_tsan: test/test_ipc.cpp src/ipc.cpp src/dsp.cpp src/config.cpp $(wildcard src/*.hpp) Makefile | bin
 	$(CXX) -O1 -g -std=c++17 -Wall -Wextra -pthread -fsanitize=thread -fno-omit-frame-pointer -Isrc test/test_ipc.cpp src/ipc.cpp src/dsp.cpp src/config.cpp -o $@
 
-test-tsan: bin/test_dsp_tsan bin/test_ipc_tsan
+test-tsan: bin/test_dsp_tsan bin/test_ipc_tsan bin/test_listening_tsan
 	./bin/test_dsp_tsan
 	./bin/test_ipc_tsan
+	./bin/test_listening_tsan
 
 bin/test_dsp_sanitize: $(TEST_SRCS) $(wildcard src/*.hpp) Makefile | bin
 	$(CXX) -O1 -g -std=c++17 -Wall -Wextra -pthread -fsanitize=address,undefined,float-cast-overflow -fno-omit-frame-pointer -Isrc $(TEST_SRCS) -o $@
@@ -124,9 +139,10 @@ bin/test_dsp_sanitize: $(TEST_SRCS) $(wildcard src/*.hpp) Makefile | bin
 bin/test_ipc_sanitize: test/test_ipc.cpp src/ipc.cpp src/dsp.cpp src/config.cpp $(wildcard src/*.hpp) Makefile | bin
 	$(CXX) -O1 -g -std=c++17 -Wall -Wextra -pthread -fsanitize=address,undefined,float-cast-overflow -fno-omit-frame-pointer -Isrc test/test_ipc.cpp src/ipc.cpp src/dsp.cpp src/config.cpp -o $@
 
-test-sanitize: bin/test_dsp_sanitize bin/test_ipc_sanitize
+test-sanitize: bin/test_dsp_sanitize bin/test_ipc_sanitize bin/test_listening_sanitize
 	./bin/test_dsp_sanitize
 	./bin/test_ipc_sanitize
+	./bin/test_listening_sanitize
 
 bench: $(TARGET)
 	./$(TARGET) bench

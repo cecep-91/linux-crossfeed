@@ -18,7 +18,7 @@ struct StereoResponse {
 };
 
 inline StereoResponse response_at(const FilterParams& p, double frequency) {
-    if (!p.enabled) return {{1.0, 0.0}, {0.0, 0.0}};
+    if (!p.enabled) return {{p.preamp_linear * (p.advanced_effects ? p.trim_linear : 1.0f), 0.0}, {0.0, 0.0}};
     const double omega = 6.28318530717958647692 * frequency / p.sample_rate;
     const auto z = std::polar(1.0, -omega);
     const auto biquad = [&](const BiquadCoeffs& c) {
@@ -34,6 +34,8 @@ inline StereoResponse response_at(const FilterParams& p, double frequency) {
         response.direct *= p.trim_linear;
         response.cross *= p.trim_linear;
     }
+    response.direct *= p.preamp_linear;
+    response.cross *= p.preamp_linear;
     return response;
 }
 

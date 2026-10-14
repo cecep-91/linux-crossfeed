@@ -27,7 +27,7 @@ jobs:
       - name: Build crossfeed application
         run: make -j$(nproc)
       - name: Run DSP, IPC, and shutdown regression tests
-        run: make test test-rt test-routing
+        run: make test test-rt test-routing test-cli
       - name: Check GTK controls and graph in light and dark themes
         run: |
           GTK_THEME=Adwaita xvfb-run -a make test-gui

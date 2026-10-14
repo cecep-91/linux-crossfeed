@@ -17,6 +17,7 @@ public:
     std::array<Point, 321> points{};
     double upper_frequency = 20000.0;
     double lower_db = -12.0;
+    double upper_db = 3.0;
 
     GtkWidget* create() {
         widget = gtk_drawing_area_new();
@@ -33,10 +34,12 @@ public:
         params = prepared;
         upper_frequency = std::min(20000.0, double(params.sample_rate) * 0.49);
         lower_db = -12.0;
+        upper_db = 3.0;
         for (size_t i = 0; i < points.size(); ++i) {
             const double f = 20.0 * std::pow(upper_frequency / 20.0, double(i) / (points.size() - 1));
             const auto r = response_at(params, f);
             points[i] = {f, r.mono_db(), r.side_db()};
+            upper_db = std::max(upper_db, std::ceil(std::max(r.mono_db(), r.side_db()) / 3.0) * 3.0);
             lower_db = std::min(lower_db, std::floor(std::min(r.mono_db(), r.side_db()) / 6.0) * 6.0);
         }
         lower_db = std::max(-60.0, lower_db);
@@ -92,7 +95,7 @@ private:
             }
         }
         const auto x = [&](double f) { return left + std::log(f / 20.0) / std::log(graph.upper_frequency / 20.0) * plot_width; };
-        const auto y = [&](double db) { return top + (3.0 - db) / (3.0 - graph.lower_db) * plot_height; };
+        const auto y = [&](double db) { return top + (graph.upper_db - db) / (graph.upper_db - graph.lower_db) * plot_height; };
         const auto ink = [&](const GdkRGBA& c, double alpha) { cairo_set_source_rgba(cr, c.red, c.green, c.blue, alpha); };
         // Legend uses both line patterns and text, including in high-contrast themes.
         for (int series = 0; series < 2; ++series) {
@@ -107,7 +110,7 @@ private:
             text(w, cr, series ? "Side · L − R" : "Mono · L + R", lx + 30, 10);
         }
         const double db_step = graph.lower_db < -24 ? 12 : 6;
-        for (double db = 0; db >= graph.lower_db; db -= db_step) {
+        for (double db = std::floor(graph.upper_db / db_step) * db_step; db >= graph.lower_db; db -= db_step) {
             ink(fg, db == 0 ? 0.28 : 0.10);
             cairo_set_line_width(cr, 1);
             cairo_move_to(cr, left, y(db)); cairo_line_to(cr, width - right, y(db)); cairo_stroke(cr);
