@@ -1,303 +1,195 @@
 <div align="center">
-  <img src="data/crossfeed.svg" width="96" height="96" alt="Crossfeed Logo" />
+  <img src="data/crossfeed.svg" width="96" height="96" alt="Crossfeed logo" />
   <h1>Crossfeed</h1>
-  <p><strong>Ultra-Low-Latency Psychoacoustic Headphone Crossfeed &amp; Spatial Audio Processor for Linux</strong></p>
+  <p><strong>Headphone crossfeed for Linux, with a native GTK interface and an interactive response graph.</strong></p>
   <p>
-    <a href="https://github.com/cecep-91/pipewire-crossfeed/releases"><img src="https://img.shields.io/github/v/release/cecep-91/pipewire-crossfeed?color=blue&label=Release" alt="Latest Release"/></a>
-    <img src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=c%2B%2B" alt="C++17"/>
-    <img src="https://img.shields.io/badge/Audio-PipeWire%20%7C%20Pulse%20%7C%20ALSA-informational" alt="Audio Backend"/>
-    <img src="https://img.shields.io/badge/Packaging-xbps%20%7C%20deb%20%7C%20rpm-orange" alt="Packages"/>
-    <img src="https://img.shields.io/badge/License-MIT-green" alt="License"/>
+    <a href="https://github.com/cecep-91/pipewire-crossfeed/releases/latest"><img src="https://img.shields.io/github/v/release/cecep-91/pipewire-crossfeed?color=blue&label=Release" alt="Latest release" /></a>
+    <a href="https://github.com/cecep-91/pipewire-crossfeed/actions/workflows/ci.yml"><img src="https://github.com/cecep-91/pipewire-crossfeed/actions/workflows/ci.yml/badge.svg?branch=development" alt="CI status" /></a>
+    <img src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=c%2B%2B" alt="C++17" />
+    <img src="https://img.shields.io/badge/Audio-PipeWire%20%7C%20PulseAudio%20%7C%20ALSA-informational" alt="Audio backends" />
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT license" /></a>
   </p>
+  <p><a href="#install">Install</a> · <a href="#using-the-gui">GUI</a> · <a href="#command-line">CLI</a> · <a href="#processing-and-presets">DSP and presets</a> · <a href="#development">Development</a></p>
 </div>
 
----
+Crossfeed blends a filtered portion of each stereo channel into the opposite ear, reducing extreme left/right separation in headphone listening. One C++17 executable provides the audio engine, GTK3 controls, tray menu, and CLI, with PipeWire, PulseAudio, and ALSA backends.
 
-Crossfeed is a standalone, single-binary C++ audio engine designed to eliminate headphone fatigue and "in-head localization." It features an ultra-responsive native GTK3 graphical interface, full system tray integration, dynamic live parameter tuning, and universal compatibility across all Linux distributions and sound servers (PipeWire, PulseAudio, and ALSA).
+**Version 2.5.0** adds a redesigned interface, theme-aware panels, a responsive layout, and a mono/side frequency-response graph. See the [release notes](RELEASE_NOTES.md) or [download the release](https://github.com/cecep-91/pipewire-crossfeed/releases/tag/v2.5.0).
 
----
+| Adwaita · light | Breeze · dark |
+| --- | --- |
+| [![Crossfeed with Adwaita, showing presets, the response graph, and tuning controls](data/screenshots/adwaita.png)](data/screenshots/adwaita.png) | [![Crossfeed with KDE's Breeze GTK theme in dark mode](data/screenshots/breeze-dark.png)](data/screenshots/breeze-dark.png) |
 
-## The Nerd Stuff: Psychoacoustics &amp; DSP Architecture
+Actual screenshots of the compiled application in disconnected preview mode. The interface was checked with Adwaita and Breeze in light/dark variants, plus HighContrast. Fonts, controls, and colors follow the active GTK theme; KDE styling uses the installed Breeze GTK theme.
 
-### 1. The Headphone Dilemma ("In-Head Localization")
-When listening to loudspeakers in a room, your ears naturally receive acoustic cross-talk: sound from the left speaker travels across the room, diffracts around your skull, and arrives at your right ear slightly delayed, attenuated, and filtered. Your brain uses these subtle spatial cues to construct a wide, natural, externalized 3D soundstage.
+## Install
 
-In contrast, stereo headphones create **unnatural acoustic isolation**. Left-channel audio never reaches the right ear. On classic stereo recordings with hard-panned instruments (e.g., 1960s–70s rock, jazz, or classical mixes), this produces extreme binaural disparity, causing:
-- **"Super-Stereo" Fatigue**: The sensation of sound originating inside the center of your skull rather than in front of you.
-- **Auditory Exhaustion**: The cognitive strain of the brain struggling to place hard-panned sound sources in physical space.
+### Release packages
 
-Crossfeed rectifies this by routing an acoustically modeled, frequency-sculpted, time-delayed copy of each stereo channel to the contralateral (opposite) ear.
-
-```
-          [ Stereo Audio Input (L / R) ]
-                        │
-         ┌──────────────┴──────────────┐
-         ▼                             ▼
-   Direct Signal                 Contralateral Signal
-         │                             │
-   [ Low-Shelf Filter ]          [ Low-Pass Filter (Cross Crossover) ]
-   (Direct ear compensation)           │
-         │                       [ Acoustic Head Shadow Filter ]
-         │                       (High-frequency skull absorption)
-         │                             │
-         │                       [ All-Pass Filter (APF) ]
-         │                       (Additional cross-path phase rotation)
-         │                             │
-         │                       [ Fractional Delay Line ]
-         │                       (Interaural Time Delay, 0–800 µs)
-         │                             │
-         │                       [ Interaural Level Difference (ILD) ]
-         │                       (Opposite-channel attenuation)
-         │                             │
-         └──────────────┬──────────────┘
-                        ▼
-               [ Channel Summing ]
-                        │
-             [ Center Summing Trim ]
-             (Master gain compensation: -6 dB to 0 dB)
-                        │
-                        ▼
-             [ Headphone Output ]
-```
-
----
-
-### Implementation safety and walkthrough
-
-See the [interactive local walkthrough](docs/walkthrough.html), [technical change log and verification](docs/walkthrough.md), and [agent/contributor guide](AGENTS.md).
-
-The audio callback uses ownership-based parameter snapshots, no mutex-taking getters or setters, and fixed storage. Ordinary parameter changes crossfade over 20 ms; delay changes also ramp. PipeWire prepares changed-rate coefficients on its main loop and uses dry passthrough until a matching snapshot is available. Rates from 8 to 192 kHz are accepted; filter frequencies are capped at 45% of sample rate. NaN/Inf settings are rejected.
-
-### 2. Core Acoustic Elements
-
-#### Interaural Level Difference (ILD)
-The skull acts as an acoustic barrier, attenuating the opposite-ear signal. Crossfeed provides adjustable opposite-ear blend attenuation from **-30.0 dB to -3.0 dB** (default: **-10.0 dB**), mimicking varying virtual speaker angles.
-
-#### Interaural Time Delay (ITD)
-Sound travels at approximately $343\text{ m/s}$ in dry air. For an average human head width ($\sim 18\text{–}20\text{ cm}$), audio from a speaker angled at $30^\circ$ takes an extra $250\text{–}300\ \mu\text{s}$ to travel around the skull curvature to the opposite ear.
-- **Engine Implementation**: A dedicated 2048-sample circular buffer with **sub-sample fractional linear interpolation**, with a configurable additional delay of **0–800 µs**. The delay ramps during parameter transitions. Low-pass and all-pass filters add their own frequency-dependent delay, so this setting is not the complete interaural time difference.
-
-#### All-Pass Phase Rotation
-When a delayed contralateral signal recombines with direct audio, destructive phase cancellation (comb filtering) can produce a hollow, thin sound and sap bass impact.
-- **Engine Implementation**: A 2nd-order Audio EQ Cookbook **All-Pass Filter (APF)** with a configurable center from 200–4000 Hz. Its own magnitude response is flat, but summing its output with the direct path can create frequency-response dips. It does not guarantee phase alignment or eliminate comb filtering.
-
-#### Acoustic Head Shadow
-Human tissue and skull geometry do not absorb all frequencies equally. Low bass diffuses freely around obstacles, whereas treble ($>1.5\text{ kHz}$) is absorbed and shadowed.
-- **Engine Implementation**: A 2nd-order low-pass head shadow filter ($1000\text{–}8000\text{ Hz}$, default: $3000\text{ Hz}$) that rolls off high treble on the cross-channel, keeping the stereo field airy while preventing phase blur.
-
-#### Center Summing Trim Matrix
-Summing Left and Right signals adds acoustic energy to center-panned mono elements (vocals, kick drums, bass), producing a $+1.5\text{ dB}$ to $+3.0\text{ dB}$ center boost that can cause $0\text{ dBFS}$ digital clipping overshoots.
-- **Engine Implementation**: A master gain compensation stage ($-6.0\text{ dB}$ to $0.0\text{ dB}$, default: $-1.5\text{ dB}$) that attenuates the entire output. It does not guarantee matched loudness, a flat mono response, or protection against all clipping.
-
----
-
-### 3. Dual-Mode Architecture
-
-The engine features a dedicated toggle between two listening philosophies:
-
-| Mode | Processing Pipeline | Best Suited For |
-|---|---|---|
-| **All Spatial Effects** | Direct shelf + cross low-pass + fractional delay + APF + shadow low-pass + output trim | Modern music, complex stereo mixes, binaural immersion, spatial staging |
-| **Pure Crossfeed** | Direct low-shelf + Q=0.5 cross low-pass; bypasses the additional delay/APF/shadow/trim. Filter phase and group delay remain. | Vintage recordings, analog purists, minimalist low-latency setups |
-
----
-
-### 4. Acoustic Emulation Presets
-
-Inside the **`Not for me options :v`** expander, you'll find presets inspired by familiar crossfeed designs. These names do not establish circuit-equivalent emulation or a calibrated physical speaker angle. The existing preset values are preserved; the Meier advanced mono response has approximately a −5.6 dB dip near 410 Hz at 48 kHz. The walkthrough plots the complete response:
-
-- **Jan Meier (Corda)**: $-9.5\text{ dB}$ blend, $650\text{ Hz}$ crossover, $280\ \mu\text{s}$ delay, $1500\text{ Hz}$ APF, $-1.5\text{ dB}$ trim, $3200\text{ Hz}$ shadow. Natural, fatigue-free presentation.
-- **Chu Moy (HeadWize)**: $-6.0\text{ dB}$ blend, $700\text{ Hz}$ crossover, $260\ \mu\text{s}$ delay, $2000\text{ Hz}$ APF, $-2.0\text{ dB}$ trim, $2800\text{ Hz}$ shadow. Preset inspired by analog crossfeed.
-- **Bauer BS2B**: $-4.5\text{ dB}$ blend, $700\text{ Hz}$ crossover, $350\ \mu\text{s}$ delay, $1200\text{ Hz}$ APF, $-2.5\text{ dB}$ trim, $2500\text{ Hz}$ shadow. Higher cross-feed simulation for pronounced centering.
-- **Siegfried Linkwitz**: $-7.0\text{ dB}$ blend, $1200\text{ Hz}$ crossover, $220\ \mu\text{s}$ delay, $1600\text{ Hz}$ APF, $-1.8\text{ dB}$ trim, $4000\text{ Hz}$ shadow. Wide-stage loudspeaker monitor emulation.
-- **Natural Studio 30°**: $-8.0\text{ dB}$ blend, $850\text{ Hz}$ crossover, $250\ \mu\text{s}$ delay, $1800\text{ Hz}$ APF, $-1.5\text{ dB}$ trim, $3500\text{ Hz}$ shadow. A preset inspired by near-field monitor listening.
-
----
-
-## Distro Packaging
-
-Crossfeed is packaged as a single native binary containing the engine, GUI, CLI, and tray app. Packages can be generated using `make`:
+Download the package for your system from [GitHub Releases](https://github.com/cecep-91/pipewire-crossfeed/releases/latest). Release binaries are currently built for Linux **x86_64**. Run the appropriate command from the directory containing your download:
 
 ```sh
-# Build all packages (.xbps, .deb, and .rpm) into dist/
-make pkg
+# Debian / Ubuntu
+sudo apt install ./crossfeed_2.5.0-1_amd64.deb
 
-# Or build individually:
-make xbps   # Void Linux (.xbps)
-make deb    # Debian, Ubuntu, Linux Mint (.deb)
-make rpm    # Fedora, RHEL, openSUSE (.rpm)
+# Fedora
+sudo dnf install ./crossfeed-2.5.0-1.x86_64.rpm
+
+# Void Linux: index the downloaded XBPS package as a local repository
+xbps-rindex -a ./crossfeed-2.5.0_1.x86_64.xbps
+sudo xbps-install -R . crossfeed
 ```
 
-Packages install `/usr/bin/crossfeed`, `/usr/share/applications/crossfeed.desktop`, the SVG application icon, and license metadata.
+Packages install the binary under `/usr/bin`, along with a desktop launcher, icon, and license. On Fedora systems using rpm-ostree, the RPM can be layered with `rpm-ostree install ./crossfeed-2.5.0-1.x86_64.rpm`.
 
-### Installing Packages
+For a per-user installation, download and extract `pipewire-crossfeed-2.5.0-linux-x86_64.tar.gz`, then run `./install.sh` inside the extracted directory. It installs to `~/.local/bin` and `~/.local/share`; make sure `~/.local/bin` is on your shell's `PATH`. The user desktop launcher points directly to this installation, even if an older system package is also present.
 
-```sh
-# Void Linux (.xbps)
-xbps-rindex -a dist/*.xbps
-sudo xbps-install -R dist crossfeed
+The binary links to GTK3, Ayatana AppIndicator, and the audio-backend libraries; the tarball is not a static build. Native PipeWire routing also uses `pw-link` and `pactl`, including a reachable PulseAudio-compatible server to create the virtual sink.
 
-# Debian / Ubuntu / Linux Mint (.deb)
-sudo apt install ./dist/crossfeed_2.5.0-1_amd64.deb
+### Build from source
 
-# Fedora / RHEL / openSUSE (.rpm)
-sudo dnf install ./dist/crossfeed-2.5.0-1.x86_64.rpm
+You need a C++17 compiler, Make, pkg-config, and the development headers for the linked libraries.
 
-# Fedora Silverblue / Kinoite / Bazzite / CoreOS (rpm-ostree)
-rpm-ostree install ./dist/crossfeed-2.5.0-1.x86_64.rpm
-```
-
-> [!NOTE]
-> **rpm-ostree & Immutable OS Compatibility**: Crossfeed RPM complies 100% with OSTree standards: all files install strictly under `/usr`, with zero scriptlets (`%pre`/`%post`) and zero mutable `/etc` or `/var` writes, enabling clean atomic package layering.
-
----
-
-## Build from Source & Local Installation
-
-### Prerequisites
-
-| Distro | Dependencies |
-|---|---|
-| **Void Linux** | `sudo xbps-install -S base-devel pipewire-devel pulseaudio-devel alsa-lib-devel gtk+3-devel libayatana-appindicator-devel` |
-| **Ubuntu / Debian** | `sudo apt install build-essential libpipewire-0.3-dev libpulse-dev libasound2-dev libgtk-3-dev libayatana-appindicator3-dev` |
-| **Fedora** | `sudo dnf install gcc-c++ make pipewire-devel pulseaudio-libs-devel alsa-lib-devel gtk3-devel libayatana-appindicator-gtk3-devel` |
-| **Arch Linux** | `sudo pacman -S --needed base-devel pipewire libpulse alsa-lib gtk3 libayatana-appindicator` |
-
-### Compile & Install
+| Distribution | Build dependencies |
+| --- | --- |
+| Void Linux | `sudo xbps-install -S base-devel pipewire-devel pulseaudio-devel alsa-lib-devel gtk+3-devel libayatana-appindicator-devel` |
+| Debian / Ubuntu | `sudo apt install build-essential pkg-config libpipewire-0.3-dev libpulse-dev libasound2-dev libgtk-3-dev libayatana-appindicator3-dev` |
+| Fedora | `sudo dnf install gcc-c++ make pkgconf-pkg-config pipewire-devel pulseaudio-libs-devel alsa-lib-devel gtk3-devel libayatana-appindicator-gtk3-devel` |
+| Arch Linux | `sudo pacman -S --needed base-devel pipewire libpulse alsa-lib gtk3 libayatana-appindicator` |
 
 ```sh
 git clone https://github.com/cecep-91/pipewire-crossfeed.git
 cd pipewire-crossfeed
-make -j$(nproc)
+make -j"$(nproc)"
 ./install.sh
 ```
 
-Or install/upgrade directly with a single command without cloning:
+`./install.sh` performs a per-user installation without sudo. To remove it, run `./install.sh --uninstall` from a source checkout or extracted release. Saved preferences are preserved. For a system package, use your package manager to uninstall it.
+
+## Quick start
+
 ```sh
-curl -fsSL https://raw.githubusercontent.com/cecep-91/pipewire-crossfeed/development/install.sh | bash
+crossfeed                   # Open the GUI; start the engine if needed
+crossfeed gui --preview     # Explore the interface without touching audio
+crossfeed preset meier      # Apply the Meier preset, or save it if stopped
+crossfeed status            # Show engine settings and routing
 ```
 
-To uninstall cleanly:
+Normal GUI/engine operation changes audio routing to feed the crossfeed processor. Preview mode starts no engine, contacts no engine IPC endpoint, creates no tray icon, and saves no settings. Its controls are interactive; close the preview window to exit. Before installing, use `./bin/crossfeed gui --preview` from the source directory.
+
+## Using the GUI
+
+- **Filter switch:** enable processing or compare with bypass. Controls remain available while bypassed.
+- **Listening presets:** choose Jan Meier, Chu Moy, Bauer BS2B, Linkwitz, or Studio 30°. The reset button restores default settings.
+- **Frequency response:** see how the current settings affect mono and side signals. Hover for frequency and gain values.
+- **Crossfeed blend and crossover:** adjust how much reaches the opposite ear and the upper range of that blend. Spin boxes provide numeric entry; double-click a slider to reset it.
+- **Spatial effects:** turn on delay, phase rotation, head shadow, and output trim, or turn them off for Pure crossfeed. Expand **Fine-tune spatial effects** to adjust each stage.
+- **Output and buffer/quantum:** inspect the selected device, backend, negotiated rate, and block size. Block duration is not total audio latency.
+
+Presets wrap and tuning controls move into one column on smaller windows. Scrolling over sliders or spin boxes scrolls the view instead of changing their values.
+
+### Reading the graph
+
+| Trace | Meaning |
+| --- | --- |
+| **Solid — Mono (L + R)** | Direct + crossfeed: the response to identical left and right inputs |
+| **Dashed — Side (L − R)** | Direct − crossfeed: the response to opposite-polarity left and right inputs |
+
+The graph is a **calculated steady-state filter response**, not a live spectrum analyzer. It updates with sliders, presets, effects mode, bypass, and reported sample rate. It uses the DSP's prepared coefficients and includes phase, the linear fractional delay, and output trim. Bypass displays a flat 0 dB response. At lower sample rates, the graph stops below Nyquist.
+
+The DC readouts describe only the response at zero frequency. A near-flat DC value does not imply a flat response across the audible band: the existing Meier advanced preset, for example, has a mono dip of roughly **−5.6 dB near 410 Hz at 48 kHz**. The graph makes this behavior visible; version 2.5.0 preserves the existing preset voicing.
+
+### Keyboard and tray controls
+
+| Shortcut | Action |
+| --- | --- |
+| `Ctrl+B` | Toggle bypass |
+| `Ctrl+1` … `Ctrl+5` | Select a preset |
+| `Ctrl+R` | Reset to defaults |
+| `Esc` / `Ctrl+W` | Hide the normal GUI window; exit in preview mode |
+| `Ctrl+Q` | Quit the GUI and request engine shutdown |
+
+In normal mode, closing the window hides it while the engine continues running. Open Crossfeed again to show it. Where the desktop supports tray indicators, the tray menu also provides bypass, presets, effects mode, engine start/stop, and Quit.
+
+## Command line
+
+The same executable provides engine control without opening the GUI:
+
 ```sh
-./install.sh --uninstall
+# Engine and status
+crossfeed start
+crossfeed status --json
+crossfeed stop
+crossfeed restart
+
+# Bypass
+crossfeed toggle
+crossfeed on
+crossfeed off
+
+# Presets and tuning
+crossfeed presets
+crossfeed preset meier
+crossfeed set --pure
+crossfeed set --effects
+crossfeed set --level -12 --freq 650 --delay 280 --phase 1500
+crossfeed set --trim -1.5 --shadow 3200
+
+# Offline computation benchmark and command reference
+crossfeed bench
+crossfeed help
 ```
 
----
+To run in the foreground, stop any background engine first, then use `crossfeed run --backend pipewire`. Backend choices are `auto`, `pipewire`, `pulse`, and `alsa`. Use `--target` to select an output, `--rate` for the requested sample rate, and `--buffer` for the requested block size. PipeWire reports its negotiated rate and quantum.
 
-## Upgrading Crossfeed
+Settings are saved under `$XDG_CONFIG_HOME/pipewire-crossfeed/state.json`, or `~/.config/pipewire-crossfeed/state.json` when `XDG_CONFIG_HOME` is unset.
 
-Crossfeed makes upgrading seamless across all environments:
+## Processing and presets
 
-### 1. In-App One-Click Upgrade (GUI)
-- Open Crossfeed and open the header menu **`☰`** (or right-click the system tray icon).
-- Select **"Check for Updates..."**.
-- When an update is detected, click **"Upgrade Now"**. Crossfeed automatically downloads the latest release, updates files, and restarts the audio engine with zero downtime.
+Both modes process stereo float32 PCM:
 
-### 2. Command Line (CLI)
+| Mode | Direct path | Cross-ear path | Output trim |
+| --- | --- | --- | --- |
+| **Pure** | Low-shelf compensation | Q = 0.5 low-pass, then blend gain | Bypassed |
+| **Spatial effects / Advanced** | Low-shelf compensation | Low-pass → head-shadow low-pass → all-pass → fractional delay → blend gain | Applied to the entire mix |
+
+Left output combines the left direct path and right cross-ear path; right output combines the right direct path and left cross-ear path. Pure mode retains filter phase/group delay. The advanced delay control adds delay on top of that introduced by the filters. An all-pass has flat magnitude in isolation, but its phase changes the direct-plus-cross sum; it does not guarantee cancellation-free output. Output trim is not a limiter.
+
+Preset names acknowledge familiar crossfeed designs; they do not establish circuit-equivalent emulation or calibrated speaker angles. Selecting a preset enables spatial effects.
+
+| Preset / CLI ID | Blend | Crossover | Delay | All-pass | Trim | Shadow |
+| --- | --- | --- | --- | --- | --- | --- |
+| Jan Meier / `meier` | −9.5 dB | 650 Hz | 280 µs | 1500 Hz | −1.5 dB | 3200 Hz |
+| Chu Moy / `chumoy` | −6.0 dB | 700 Hz | 260 µs | 2000 Hz | −2.0 dB | 2800 Hz |
+| Bauer BS2B / `bs2b` | −4.5 dB | 700 Hz | 350 µs | 1200 Hz | −2.5 dB | 2500 Hz |
+| Linkwitz / `linkwitz` | −7.0 dB | 1200 Hz | 220 µs | 1600 Hz | −1.8 dB | 4000 Hz |
+| Studio 30° / `studio` | −8.0 dB | 850 Hz | 250 µs | 1800 Hz | −1.5 dB | 3500 Hz |
+
+### Real-time behavior and limits
+
+- Audio processing uses fixed storage and ownership-based parameter snapshots. Control writers may lock; the audio callback does not take that mutex or compute filter coefficients.
+- Ordinary parameter, mode, and bypass changes crossfade over **20 ms**. Delay changes also ramp. Initial processing and explicit resets apply immediately.
+- Supported rates are **8–192 kHz**. Cutoffs are capped at **45% of sample rate**, and non-finite control values are rejected.
+- PipeWire prepares changed-rate coefficients on its control loop. Audio uses dry passthrough until a matching snapshot is available, then fades processing in. Clock changes can still be audible.
+- Coefficients use double intermediates, with float storage and states. Processing scopes denormal handling on x86 SSE2 and AArch64; global `-ffast-math` is not used.
+- Routing restoration is best effort. Removed devices/ports and simultaneous routing edits need care. PulseAudio's blocking simple API can delay shutdown until I/O returns.
+
+See [the DSP implementation](src/dsp.cpp), [parameter ownership](src/dsp.hpp), and [the graph model](src/response.hpp) for details.
+
+## Updating
+
+For a per-user installation:
+
 ```sh
-# Check if an update is available:
 crossfeed check-update
-
-# Upgrade to the latest version:
 crossfeed upgrade
 ```
 
-### 3. Git Source Trees
-If you cloned the repository locally:
-```sh
-make update
-# or:
-./install.sh --update
-```
+The GUI's menu also has **Check for Updates…** and an upgrade action. The updater uses a source checkout when available, otherwise a release tarball, and installs under `~/.local`. It restarts an engine that was running; this can interrupt playback. Reopen the GUI after upgrading to use the new interface.
 
----
+From a source checkout, `make update` or `./install.sh --update` runs the updater. For a package-managed installation, install the newer release package with your package manager to keep that installation under package-manager control.
 
-## Usage
-
-### 1. Graphical Interface & System Tray
-
-Launch Crossfeed from your application launcher or terminal:
-```sh
-crossfeed
-```
-
-- **Header Bar**: Master toggle switch and status indicator.
-- **Scroll Protection**: Mouse wheel or touchpad scrolling over sliders will never accidentally alter values; the view scrolls naturally.
-- **"Not for me options :v" Expander**:
-  - **Acoustic Spatial Effects Switch**: Toggle between Pure Crossfeed and All Effects.
-  - **Emulation Presets**: One-click switching between Jan Meier, Chu Moy, Bauer BS2B, Linkwitz, and Studio 30°.
-  - **Sliders**: Acoustic Delay (ITD), Phase APF, Center Summing Trim, and Head Shadow.
-- **System Tray**: Closing the window docks Crossfeed to the tray. Right-click the tray icon to toggle bypass, change presets, switch modes, or quit cleanly.
-
-### 2. Command Line Interface
-
-The same binary provides full CLI control:
-
-```sh
-# Service management
-crossfeed start     # Start background engine
-crossfeed status    # View active routing, buffer/quantum, and parameters
-crossfeed stop      # Stop engine and restore default routing
-crossfeed restart   # Restart engine
-
-# Real-time filter toggling
-crossfeed toggle    # Toggle bypass (ideal for keyboard shortcuts)
-crossfeed on        # Force enable
-crossfeed off       # Force bypass
-
-# Adjust parameters on the fly
-crossfeed set --pure                                            # Pure Crossfeed mode
-crossfeed set --effects                                         # All Spatial Effects mode
-crossfeed set --level -12.0 --freq 650 --delay 280 --phase 1500 # Live parameter tuning
-
-# Benchmark DSP throughput
-crossfeed bench
-```
-
----
-
-## References & Scientific Literature
-
-- **Dr. Jan Meier (Meier Audio / Corda)**: Research on natural headphone crossfeed filters, passive attenuation networks, and physiological listening fatigue. ([Meier Audio Crossfeed](https://www.meier-audio.de/crossfeed.html))
-- **Chu Moy (HeadWize)**: Pioneering work on passive analog crossfeed circuits for headphone listening.
-- **Boris Bauer (BS2B)**: Development of the Bauer Stereophonic-to-Binaural DSP model and research on stereophonic cross-talk reproduction. ([Bauer BS2B Project](https://bs2b.sourceforge.net/))
-- **Siegfried Linkwitz**: Acoustic research on stereo imaging, head-diffraction compensation, and loudspeaker-to-headphone simulation.
-- **Robert Bristow-Johnson**: *Audio EQ Cookbook* — mathematical foundation for second-order biquadratic filter coefficient calculation (Direct Form II Transposed).
-
----
-
-## Shoutouts & Acknowledgments
-
-- **Wim Taymans & the PipeWire Team**: For engineering PipeWire into the ultra-low-latency multimedia foundation for modern Linux.
-- **Ayatana Indicators Community**: For maintaining the Ayatana AppIndicator protocol, bringing rock-solid tray icons to Wayland and X11 desktops alike.
-- **EasyEffects & Linux Pro-Audio Developers**: For pushing Linux audio DSP forward and inspiring pristine multi-node compatibility.
-- **Void Linux, Debian, Fedora & Arch Maintainers**: For outstanding packaging ecosystems and minimal developer tooling.
-
----
-
-## License
-
-Released under the [MIT License](LICENSE). Copyright © 2024–2026.
-
-## Development checks
-
-The GTK3 interface follows the active desktop theme (including Adwaita and KDE's
-Breeze GTK theme), with light/dark colors, wrapping presets, and controls that
-reflow on smaller windows. The **Frequency response** graph updates immediately
-when you change a preset, slider, spatial-effects mode, or bypass setting.
-The solid line shows mono (direct + crossfeed); the dashed line shows side
-(direct − crossfeed). Hover for frequency and gain values. This is a calculated
-steady-state filter response, not a live spectrum analyzer. It includes phase,
-fractional delay and output trim, using the engine's coefficient preparation.
-
-To explore the interface without starting or contacting the audio engine:
-
-```sh
-./bin/crossfeed gui --preview
-```
-
-Preview controls are local and are not saved. Close the preview to exit. Normal
-GUI mode continues to control the running engine and integrate with the tray.
+## Development
 
 ```sh
 make -j4
@@ -305,16 +197,39 @@ make test test-rt test-routing
 make test-sanitize
 make test-tsan
 make bench
-make preview
-# Optional GTK interaction checks; requires a display or Xvfb:
-xvfb-run -a make test-gui
+
+# GTK interaction checks on a private virtual display (requires Xvfb)
+GTK_THEME=Adwaita xvfb-run -a make test-gui
+GTK_THEME=Adwaita:dark xvfb-run -a make test-gui
 ```
 
-Core tests do not require GTK development headers. Sanitizer targets need the compiler's matching sanitizer runtime/development packages (Void: `libsanitizer-devel`). The IPC test needs Unix socket permissions. The routing failure test replaces routing commands and uses an isolated PipeWire runtime directory.
+| Check | Coverage |
+| --- | --- |
+| `make test` | DSP regressions, isolated IPC/shutdown tests, and graph-model agreement with processed impulses across all presets, both modes, and 8–192 kHz |
+| `make test-rt` | Instrumented processing checks for C++ allocations and pthread mutex locks |
+| `make test-routing` | Native startup failure with fake routing commands and an isolated runtime directory |
+| `make test-sanitize` | Address, undefined-behavior, float-cast-overflow, and leak checks |
+| `make test-tsan` | DSP and IPC thread-race checks |
+| `make test-gui` | Actual GTK controls in disconnected preview mode: switches, graph updates, presets, rate bounds, narrow layout, and stopped state |
+| `make bench` | Offline callback computation time for steady input, decaying silence, and parameter changes |
 
-`make test` also compares the graph model with processed DSP impulses at 8–192 kHz.
-`test-gui` exercises the real widgets in disconnected preview mode and writes
-screenshots to `/tmp/crossfeed-gui-preview`. Use `GTK_THEME=Adwaita:dark` or
-`GTK_THEME=Breeze` with that command to test another installed GTK theme.
+Core tests do not require GTK development headers. IPC tests require local Unix socket permissions; routing tests require Python 3 and the full application build. Sanitizer targets need the compiler's matching runtime/development packages. GTK tests require a display or Xvfb and write screenshots to `/tmp/crossfeed-gui-preview`. Other installed themes can be tested with `GTK_THEME=Breeze`, `GTK_THEME=Breeze-Dark`, or `GTK_THEME=HighContrast`.
 
-The GUI reports audio block duration; this is not complete graph/device latency. `make bench` reports measured offline callback time for steady audio, decaying silence, and parameter changes. Its result is not a guarantee against xruns. PulseAudio cancellation can remain blocked until its simple API I/O returns; hardware hotplug and live routing require separate integration testing.
+CI runs the regression, sanitizer, and GTK light/dark checks, then exercises packages on Linux distributions. The graph and theme checks do not establish measured end-to-end latency, hotplug reliability, or subjective listening quality. Benchmark results describe computation time, not an xrun guarantee.
+
+### Build packages
+
+```sh
+make deb       # Requires dpkg-deb
+make rpm       # Requires rpmbuild
+make xbps      # Requires xbps-create
+make pkg       # All three; outputs are written to dist/
+```
+
+The [release workflow](.github/workflows/release.yml) builds Debian/RPM packages and a binary tarball on Ubuntu, and the XBPS package in a Void Linux container.
+
+## Acknowledgments and license
+
+Crossfeed draws inspiration from Meier, Moy, Bauer, and Linkwitz crossfeed designs, and uses biquad formulations associated with Robert Bristow-Johnson's Audio EQ Cookbook. Thanks to the PipeWire, PulseAudio, ALSA, GTK, and Ayatana communities for the underlying audio and desktop infrastructure.
+
+Released under the [MIT License](LICENSE).
