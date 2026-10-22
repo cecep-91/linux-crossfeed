@@ -1,3 +1,22 @@
+# Crossfeed 2.7.0 — Real-Time Lock-Free DSP Triple-Buffering & PipeWire Optimization
+
+- **Real-Time Lock-Free DSP Parameters**:
+  - Implemented tri-slot parameter ownership model (writer, exchange, reader).
+  - Atomic exchange transfers parameter snapshots with acquire/release ordering, guaranteeing zero allocations, zero lock contention, and true real-time safety during parameter updates in the audio thread.
+- **PipeWire Link Management Loop Optimization**:
+  - Optimized link manager polling and routing recovery loop, eliminating redundant CPU wakeups while audio streams are active.
+  - Added automated native routing lifecycle regression testing (`test/pipewire_routing_driver.cpp`, `test/test_pipewire_routing.py`).
+- **Hardened IPC Socket Security**:
+  - Added peer credential verification (`SO_PEERCRED` on Linux) to restrict control socket communication strictly to the owning user UID.
+  - Implemented bounded socket read/write timeouts and robust malformed command handling.
+- **Extended Test & Characterization Suites**:
+  - Comprehensive characterization test coverage for filter transitions, sub-sample delay interpolation, 8–192 kHz Nyquist limits, and mono/side impulse alignment.
+  - Added headless UI test verification (`xvfb-run -a make test-gui`).
+- **Graceful Self-Updater Shutdown**:
+  - Refined `scripts/update.sh` to cleanly stop running background engine instances before rebuilding and smoothly restart them after installation.
+
+---
+
 # Crossfeed 2.6.1 — GUI switch lever state synchronization fix
 
 - Fixes `GtkSwitch` toggling and sliding behavior on GNOME and KDE desktops (master bypass switch and spatial effects switch).

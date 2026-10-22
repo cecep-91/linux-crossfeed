@@ -189,7 +189,10 @@ fi
 WAS_RUNNING=0
 if [ -n "$INSTALLED_BIN" ] && "$INSTALLED_BIN" status >/dev/null 2>&1; then
     WAS_RUNNING=1
-    echo "==> Crossfeed engine is currently running (will restart after upgrade)"
+    echo "==> Crossfeed engine is currently running (stopping cleanly for upgrade)..."
+    "$INSTALLED_BIN" stop >/dev/null 2>&1 || true
+    pkill -f "crossfeed (run|start)" 2>/dev/null || true
+    sleep 0.3
 fi
 
 if [ "$IS_GIT_REPO" = "1" ]; then
@@ -246,11 +249,13 @@ fi
 
 # Restart engine if it was running
 if [ "$WAS_RUNNING" = "1" ]; then
-    echo "==> Restarting background Crossfeed engine..."
-    if [ -x "$DEFAULT_BIN" ]; then
-        "$DEFAULT_BIN" restart || true
-    elif [ -n "$INSTALLED_BIN" ]; then
-        "$INSTALLED_BIN" restart || true
+    echo "==> Starting fresh Crossfeed engine..."
+    TARGET_EXEC="$DEFAULT_BIN"
+    if [ ! -x "$TARGET_EXEC" ] && [ -n "$INSTALLED_BIN" ]; then
+        TARGET_EXEC="$INSTALLED_BIN"
+    fi
+    if [ -x "$TARGET_EXEC" ]; then
+        "$TARGET_EXEC" start || true
     fi
 fi
 

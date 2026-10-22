@@ -69,6 +69,8 @@ static void print_help(const char* prog) {
               << "  off               Bypass crossfeed (active output trim and preamp still apply)\n"
               << "  presets           List available psychoacoustic presets\n"
               << "  preset <name>     Apply a psychoacoustic preset (e.g. meier, chumoy, bs2b, linkwitz, studio)\n"
+              << "  sinks             List available physical audio output devices\n"
+              << "  target <name>     Switch target output device (or 'auto' for smart hotplug)\n"
               << "  set               Adjust filter parameters live (including --preamp <dB>)\n"
               << "  ab store a|b      Save current sound to an A/B slot (engine session)\n"
               << "  ab a|b|dry        Listen to slot A, slot B, or dry audio with the same output trim\n"
@@ -607,6 +609,71 @@ static int cmd_preset(int argc, char** argv) {
     }
 }
 
+static int cmd_sinks(bool json_output = false) {
+    std::string resp;
+    if (!IpcClient::send_command(Config::get_socket_path(), "SINKS", resp)) {
+        std::cerr << "Crossfeed engine is not running.\n";
+        return 1;
+    }
+    if (json_output) {
+        std::cout << resp << "\n";
+        return 0;
+    }
+
+    std::string active_sink;
+    size_t act_pos = resp.find("\"active\": \"");
+    if (act_pos != std::string::npos) {
+        act_pos += 11;
+        size_t end = resp.find('"', act_pos);
+        if (end != std::string::npos) active_sink = resp.substr(act_pos, end - act_pos);
+    }
+
+    std::cout << "================================================================================\n"
+              << "                         Audio Output Devices                           \n"
+              << "================================================================================\n"
+              << "  STATUS    DEVICE NAME / ENDPOINT\n"
+              << "--------------------------------------------------------------------------------\n";
+
+    size_t pos = 0;
+    while ((pos = resp.find("\"name\": \"", pos)) != std::string::npos) {
+        pos += 9;
+        size_t end = resp.find('"', pos);
+        if (end == std::string::npos) break;
+        std::string name = resp.substr(pos, end - pos);
+        pos = end + 1;
+
+        bool is_active = (!active_sink.empty() && name == active_sink);
+        std::cout << "  " << (is_active ? "● ACTIVE  " : "          ") << name << "\n";
+    }
+
+    std::cout << "================================================================================\n"
+              << "Target switch: crossfeed target <device|auto>\n";
+    return 0;
+}
+
+static int cmd_target(int argc, char** argv) {
+    if (argc < 3) {
+        std::cerr << "Usage: crossfeed target <sink_name|auto>\n";
+        return 1;
+    }
+    std::string target = argv[2];
+    std::string resp;
+    if (IpcClient::send_command(Config::get_socket_path(), "TARGET " + target, resp)) {
+        if (resp.find("\"error\"") != std::string::npos) {
+            std::cerr << resp << "\n";
+            return 1;
+        }
+        std::cout << "Target output set to: " << target << "\n";
+        return 0;
+    }
+    ConfigState cfg;
+    Config::load_state(cfg);
+    cfg.target_sink = target;
+    Config::save_state(cfg);
+    std::cout << "Engine is stopped. Saved target output '" << target << "' to configuration.\n";
+    return 0;
+}
+
 static int cmd_update(int argc, char** argv, bool check_only) {
     std::string script_path;
     std::vector<std::string> candidates = {
@@ -681,7 +748,14 @@ int main(int argc, char** argv) {
         return cmd_stop();
     } else if (cmd == "restart") {
         cmd_stop();
-        usleep(200000);
+        std::string ping_resp;
+        for (int i = 0; i < 30; ++i) {
+            usleep(100000);
+            if (!IpcClient::send_command(Config::get_socket_path(), "PING", ping_resp)) {
+                break;
+            }
+        }
+        usleep(100000);
         return cmd_start(argc, argv);
     } else if (cmd == "status") {
         bool json = (argc > 2 && std::string(argv[2]) == "--json");
@@ -696,6 +770,10 @@ int main(int argc, char** argv) {
         return cmd_presets();
     } else if (cmd == "preset") {
         return cmd_preset(argc, argv);
+    } else if (cmd == "sinks") {
+        return cmd_sinks(argc > 2 && std::string(argv[2]) == "--json");
+    } else if (cmd == "target") {
+        return cmd_target(argc, argv);
     } else if (cmd == "set") {
         return cmd_set(argc, argv);
     } else if (cmd == "ab" || cmd == "meters") {
@@ -722,7 +800,7 @@ int main(int argc, char** argv) {
         run_benchmark();
         return 0;
     } else if (cmd == "--version" || cmd == "-v") {
-        std::cout << "pipewire-crossfeed 2.6.1 (standalone)\n";
+        std::cout << "pipewire-crossfeed 2.7.0 (standalone)\n";
         return 0;
     } else if (cmd == "help" || cmd == "--help" || cmd == "-h") {
         print_help(argv[0]);

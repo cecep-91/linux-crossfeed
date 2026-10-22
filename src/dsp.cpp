@@ -9,6 +9,7 @@ constexpr double PI = 3.14159265358979323846;
 
 CrossfeedDSP::CrossfeedDSP() {
     recompute_coeffs(control_params_);
+    requested_params_ = control_params_;
     control_snapshot_.current = control_params_;
     for (auto& p : param_buffers_) p = control_snapshot_;
     pending_snapshot_ = control_snapshot_;
@@ -39,6 +40,21 @@ bool CrossfeedDSP::normalize_params(FilterParams& p) {
 bool CrossfeedDSP::publish_locked(FilterParams p) {
     const uint32_t requested = requested_rate_.load(std::memory_order_acquire);
     if (requested != 0) p.sample_rate = static_cast<float>(requested);
+    if (!valid_sample_rate(p.sample_rate) || !std::isfinite(p.level_db) ||
+        !std::isfinite(p.freq_hz) || !std::isfinite(p.delay_us) ||
+        !std::isfinite(p.phase_apf_hz) || !std::isfinite(p.center_trim_db) ||
+        !std::isfinite(p.shadow_hz) || !std::isfinite(p.preamp_db)) return false;
+
+    // Preserve pristine target parameters requested by caller
+    requested_params_ = p;
+    requested_params_.preamp_db = std::clamp(p.preamp_db, -24.0f, 12.0f);
+    requested_params_.level_db = std::clamp(p.level_db, MIN_LEVEL_DB, MAX_LEVEL_DB);
+    requested_params_.freq_hz = std::clamp(p.freq_hz, MIN_FREQ_HZ, MAX_FREQ_HZ);
+    requested_params_.delay_us = std::clamp(p.delay_us, MIN_DELAY_US, MAX_DELAY_US);
+    requested_params_.phase_apf_hz = std::clamp(p.phase_apf_hz, MIN_PHASE_APF_HZ, MAX_PHASE_APF_HZ);
+    requested_params_.center_trim_db = std::clamp(p.center_trim_db, MIN_CENTER_TRIM_DB, MAX_CENTER_TRIM_DB);
+    requested_params_.shadow_hz = std::clamp(p.shadow_hz, MIN_SHADOW_HZ, MAX_SHADOW_HZ);
+
     if (!normalize_params(p)) return false;
     p.generation = control_params_.generation + 1;
     recompute_coeffs(p);
@@ -59,7 +75,7 @@ bool CrossfeedDSP::publish_locked(FilterParams p) {
 bool CrossfeedDSP::set_params(float sample_rate, float level_db, float freq_hz, bool enabled) {
     if (!valid_sample_rate(sample_rate)) return false;
     std::lock_guard<std::mutex> lock(write_mutex_);
-    auto p = control_params_;
+    auto p = requested_params_;
     p.sample_rate = sample_rate;
     p.level_db = level_db;
     p.freq_hz = freq_hz;
@@ -69,10 +85,11 @@ bool CrossfeedDSP::set_params(float sample_rate, float level_db, float freq_hz, 
 
 bool CrossfeedDSP::set_all_params(float sample_rate, float level_db, float freq_hz,
                                   float delay_us, float phase_apf_hz, float center_trim_db,
-                                  float shadow_hz, bool advanced_effects, bool enabled) {
+                                  float shadow_hz, bool advanced_effects, bool enabled,
+                                  bool limiter) {
     if (!valid_sample_rate(sample_rate)) return false;
     std::lock_guard<std::mutex> lock(write_mutex_);
-    auto p = control_params_;
+    auto p = requested_params_;
     p.sample_rate = sample_rate;
     p.level_db = level_db;
     p.freq_hz = freq_hz;
@@ -82,12 +99,13 @@ bool CrossfeedDSP::set_all_params(float sample_rate, float level_db, float freq_
     p.shadow_hz = shadow_hz;
     p.advanced_effects = advanced_effects;
     p.enabled = enabled;
+    p.limiter = limiter;
     return publish_locked(p);
 }
 
 bool CrossfeedDSP::set_numeric(float FilterParams::*field, float value) {
     std::lock_guard<std::mutex> lock(write_mutex_);
-    auto p = control_params_;
+    auto p = requested_params_;
     p.*field = value;
     return publish_locked(p);
 }
@@ -118,21 +136,35 @@ bool CrossfeedDSP::set_shadow_hz(float value) {
 
 void CrossfeedDSP::set_enabled(bool value) {
     std::lock_guard<std::mutex> lock(write_mutex_);
-    auto p = control_params_;
+    auto p = requested_params_;
     p.enabled = value;
     publish_locked(p);
 }
 
 void CrossfeedDSP::set_advanced_effects(bool value) {
     std::lock_guard<std::mutex> lock(write_mutex_);
-    auto p = control_params_;
+    auto p = requested_params_;
     p.advanced_effects = value;
+    publish_locked(p);
+}
+
+void CrossfeedDSP::set_limiter(bool value) {
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    auto p = requested_params_;
+    p.limiter = value;
     publish_locked(p);
 }
 
 FilterParams CrossfeedDSP::get_params() const {
     std::lock_guard<std::mutex> lock(write_mutex_);
     return control_params_;
+}
+
+bool CrossfeedDSP::get_limiter() const { return get_params().limiter; }
+
+FilterParams CrossfeedDSP::get_requested_params() const {
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    return requested_params_;
 }
 
 float CrossfeedDSP::get_level_db() const { return get_params().level_db; }
@@ -162,7 +194,9 @@ bool CrossfeedDSP::service_sample_rate() {
     const auto rate = requested_rate_.load(std::memory_order_acquire);
     if (rate == 0 || static_cast<float>(rate) == control_params_.sample_rate) return true;
     if (!valid_sample_rate(static_cast<float>(rate))) return false;
-    return publish_locked(control_params_);
+    auto p = requested_params_;
+    p.sample_rate = static_cast<float>(rate);
+    return publish_locked(p);
 }
 
 void CrossfeedDSP::reset() {
@@ -363,6 +397,20 @@ void CrossfeedDSP::process_sample(float l, float r, float& out_l, float& out_r) 
         out_r += mix * (next_r - out_r);
         if (--fade_remaining_ == 0) active_engine_ = 1 - active_engine_;
     }
+    if (engines_[active_engine_].params.limiter) {
+        constexpr float T = 0.95f; // -0.45 dBFS knee threshold
+        constexpr float S = 1.0f - T; // 0.05f
+        const float al = std::abs(out_l);
+        if (al > T) {
+            const float dl = al - T;
+            out_l = (out_l > 0.0f ? 1.0f : -1.0f) * (T + S * (dl / (S + dl)));
+        }
+        const float ar = std::abs(out_r);
+        if (ar > T) {
+            const float dr = ar - T;
+            out_r = (out_r > 0.0f ? 1.0f : -1.0f) * (T + S * (dr / (S + dr)));
+        }
+    }
 }
 
 void CrossfeedDSP::process_interleaved(const float* in, float* out, size_t frames) noexcept {
@@ -396,7 +444,7 @@ void CrossfeedDSP::process_planar(const float* in_l, const float* in_r, float* o
 bool CrossfeedDSP::same_sound(const FilterParams& a, const FilterParams& b) noexcept {
     return a.level_db == b.level_db && a.freq_hz == b.freq_hz && a.delay_us == b.delay_us &&
         a.phase_apf_hz == b.phase_apf_hz && a.center_trim_db == b.center_trim_db &&
-        a.shadow_hz == b.shadow_hz && a.advanced_effects == b.advanced_effects;
+        a.shadow_hz == b.shadow_hz && a.advanced_effects == b.advanced_effects && a.limiter == b.limiter;
 }
 
 bool CrossfeedDSP::set_snapshot(FilterParams params) {

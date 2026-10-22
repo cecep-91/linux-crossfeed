@@ -143,6 +143,8 @@ static std::string build_status_json(CrossfeedDSP* dsp, AudioBackend* backend) {
        << "  \"advanced_effects\": " << (params.advanced_effects ? "true" : "false") << ",\n"
        << "  \"backend\": \"" << (backend ? backend->get_backend_name() : "unknown") << "\",\n"
        << "  \"target\": \"" << (backend ? backend->get_active_target() : "") << "\",\n"
+       << "  \"requested_target\": \"" << (backend ? backend->get_requested_target() : "") << "\",\n"
+       << "  \"output_state\": \"" << (backend ? backend->get_output_state() : "ready") << "\",\n"
        << "  \"sample_rate\": " << (backend ? backend->get_sample_rate() : 48000) << ",\n"
        << "  \"buffer_frames\": " << (backend ? backend->get_buffer_frames() : 256) << ",\n"
        << std::setprecision(2)
@@ -151,8 +153,38 @@ static std::string build_status_json(CrossfeedDSP* dsp, AudioBackend* backend) {
        << "  \"slot_a\": " << (slot_a ? "true" : "false") << ",\n"
        << "  \"slot_b\": " << (slot_b ? "true" : "false") << ",\n"
        << "  \"slot_a_active\": " << (params.enabled && slot_a && CrossfeedDSP::same_sound(params, a) ? "true" : "false") << ",\n"
-       << "  \"slot_b_active\": " << (params.enabled && slot_b && CrossfeedDSP::same_sound(params, b) ? "true" : "false") << ",\n"
-       << std::setprecision(6)
+       << "  \"slot_b_active\": " << (params.enabled && slot_b && CrossfeedDSP::same_sound(params, b) ? "true" : "false") << ",\n";
+    if (slot_a) {
+        ss << std::fixed << std::setprecision(1)
+           << "  \"slot_a_level_db\": " << a.level_db << ",\n"
+           << std::setprecision(0)
+           << "  \"slot_a_freq_hz\": " << a.freq_hz << ",\n"
+           << std::setprecision(1)
+           << "  \"slot_a_delay_us\": " << a.delay_us << ",\n"
+           << std::setprecision(0)
+           << "  \"slot_a_phase_apf_hz\": " << a.phase_apf_hz << ",\n"
+           << std::setprecision(1)
+           << "  \"slot_a_center_trim_db\": " << a.center_trim_db << ",\n"
+           << std::setprecision(0)
+           << "  \"slot_a_shadow_hz\": " << a.shadow_hz << ",\n"
+           << "  \"slot_a_advanced\": " << (a.advanced_effects ? "true" : "false") << ",\n";
+    }
+    if (slot_b) {
+        ss << std::fixed << std::setprecision(1)
+           << "  \"slot_b_level_db\": " << b.level_db << ",\n"
+           << std::setprecision(0)
+           << "  \"slot_b_freq_hz\": " << b.freq_hz << ",\n"
+           << std::setprecision(1)
+           << "  \"slot_b_delay_us\": " << b.delay_us << ",\n"
+           << std::setprecision(0)
+           << "  \"slot_b_phase_apf_hz\": " << b.phase_apf_hz << ",\n"
+           << std::setprecision(1)
+           << "  \"slot_b_center_trim_db\": " << b.center_trim_db << ",\n"
+           << std::setprecision(0)
+           << "  \"slot_b_shadow_hz\": " << b.shadow_hz << ",\n"
+           << "  \"slot_b_advanced\": " << (b.advanced_effects ? "true" : "false") << ",\n";
+    }
+    ss << std::setprecision(6)
        << "  \"input_peak\": " << listening.input_peak << ",\n"
        << "  \"output_peak\": " << listening.output_peak << ",\n"
        << "  \"input_hold\": " << listening.input_hold << ",\n"
@@ -274,6 +306,31 @@ std::string IpcServer::handle_command(const std::string& cmd) {
     } else if (cmd == "METERS RESET") {
         dsp_->reset_meters();
         return build_status_json(dsp_, backend_);
+    } else if (cmd == "SINKS") {
+        std::ostringstream ss;
+        ss << "{\"sinks\": [";
+        if (backend_) {
+            auto sinks = backend_->list_sinks();
+            for (size_t i = 0; i < sinks.size(); ++i) {
+                if (i > 0) ss << ", ";
+                ss << "{\"name\": \"" << sinks[i].name << "\", "
+                   << "\"description\": \"" << sinks[i].description << "\", "
+                   << "\"default\": " << (sinks[i].is_default ? "true" : "false") << "}";
+            }
+        }
+        ss << "], \"active\": \"" << (backend_ ? backend_->get_active_target() : "") << "\"}";
+        return ss.str();
+    } else if (cmd.rfind("TARGET ", 0) == 0) {
+        std::string tgt = cmd.substr(7);
+        while (!tgt.empty() && (tgt.front() == ' ' || tgt.front() == '\t')) tgt.erase(tgt.begin());
+        while (!tgt.empty() && (tgt.back() == ' ' || tgt.back() == '\t' || tgt.back() == '\r' || tgt.back() == '\n')) tgt.pop_back();
+        if (backend_ && backend_->set_target(tgt)) {
+            config_->target_sink = tgt.empty() ? "auto" : tgt;
+            Config::save_state(*config_);
+            return build_status_json(dsp_, backend_);
+        } else {
+            return "{\"error\":\"failed_to_set_target\"}";
+        }
     } else if (cmd == "STOP") {
         // stop() only requests cancellation. The processing owner tears down;
         // ipc.stop() joins this thread after it has sent the response.

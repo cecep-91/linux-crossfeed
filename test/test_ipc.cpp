@@ -15,6 +15,14 @@ public:
     void stop() override { stopped.store(true); }
     std::string get_backend_name() const override { return "test"; }
     std::string get_active_target() const override { return "test-sink"; }
+    std::string get_requested_target() const override { return requested_target; }
+    std::string get_output_state() const override { return "waiting"; }
+    bool set_target(const std::string& target) override {
+        if (target == "invalid") return false;
+        requested_target = target;
+        return true;
+    }
+    std::string requested_target = "auto";
     uint32_t get_sample_rate() const override { return 48000; }
     uint32_t get_buffer_frames() const override { return 1024; }
     bool is_running() const override { return !stopped.load(); }
@@ -45,6 +53,15 @@ int main() {
     };
 
     assert(send("PING") == "PONG");
+    assert(send("STATUS").find("\"output_state\": \"waiting\"") != std::string::npos);
+    const auto target_response = send("TARGET usb.dac");
+    assert(target_response.find("\"requested_target\": \"usb.dac\"") != std::string::npos);
+    ConfigState saved_target;
+    assert(Config::load_state(saved_target) && saved_target.target_sink == "usb.dac");
+    assert(send("TARGET invalid").find("error") != std::string::npos);
+    assert(Config::load_state(saved_target) && saved_target.target_sink == "usb.dac");
+    assert(send("TARGET auto").find("error") == std::string::npos);
+    assert(Config::load_state(saved_target) && saved_target.target_sink == "auto");
     auto before = dsp.get_params();
     for (const char* command : {"SET level=-20 delay=nan", "SET freq=inf", "SET trim=-inf",
                                 "SET freq=123junk", "SET advanced=maybe"}) {

@@ -96,7 +96,24 @@ public:
         size_t idx1 = (write_idx_ - 1 - int_delay) & (BUFFER_SIZE - 1);
         size_t idx2 = (idx1 - 1) & (BUFFER_SIZE - 1);
 
-        return (1.0f - frac) * buffer_[idx1] + frac * buffer_[idx2];
+        if (int_delay < 1) {
+            return (1.0f - frac) * buffer_[idx1] + frac * buffer_[idx2];
+        }
+
+        size_t idx0 = (idx1 + 1) & (BUFFER_SIZE - 1);
+        size_t idx3 = (idx1 - 2) & (BUFFER_SIZE - 1);
+
+        float y0 = buffer_[idx0];
+        float y1 = buffer_[idx1];
+        float y2 = buffer_[idx2];
+        float y3 = buffer_[idx3];
+
+        float c0 = y1;
+        float c1 = 0.5f * (y2 - y0);
+        float c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+        float c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
+
+        return ((c3 * frac + c2) * frac + c1) * frac + c0;
     }
 
 private:
@@ -115,6 +132,7 @@ struct FilterParams {
     float shadow_hz = DEFAULT_SHADOW_HZ;
     bool advanced_effects = true;
     bool enabled = true;
+    bool limiter = false;
     float preamp_db = 0.0f;
     float preamp_linear = 1.0f;
 
@@ -141,7 +159,8 @@ public:
     bool set_params(float sample_rate, float level_db, float freq_hz, bool enabled);
     bool set_all_params(float sample_rate, float level_db, float freq_hz,
                         float delay_us, float phase_apf_hz, float center_trim_db,
-                        float shadow_hz, bool advanced_effects, bool enabled);
+                        float shadow_hz, bool advanced_effects, bool enabled,
+                        bool limiter = false);
 
     bool set_snapshot(FilterParams params);
     bool set_preamp_db(float value);
@@ -160,9 +179,11 @@ public:
     bool set_shadow_hz(float shadow_hz);
     void set_advanced_effects(bool enabled);
     void set_enabled(bool enabled);
+    void set_limiter(bool enabled);
 
     bool is_enabled() const;
     bool get_advanced_effects() const;
+    bool get_limiter() const;
     float get_level_db() const;
     float get_freq_hz() const;
     float get_delay_us() const;
@@ -171,6 +192,7 @@ public:
     float get_shadow_hz() const;
     float get_sample_rate() const;
     FilterParams get_params() const; // Non-RT, coherent control snapshot.
+    FilterParams get_requested_params() const; // Non-RT, pristine user target settings.
 
     // The callback only posts a rate. A non-RT timer services it and prepares
     // coefficients. Until a matching snapshot arrives, audio passes through.
@@ -208,6 +230,7 @@ private:
     };
     ControlSnapshot param_buffers_[3], control_snapshot_, pending_snapshot_;
 
+    FilterParams requested_params_;
     FilterParams control_params_;
     unsigned write_idx_ = 0; // Protected by write_mutex_.
     unsigned read_idx_ = 1;  // Audio thread only.

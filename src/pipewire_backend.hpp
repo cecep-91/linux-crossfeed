@@ -9,6 +9,7 @@
 #include <thread>
 #include <set>
 #include <mutex>
+#include <map>
 
 namespace crossfeed {
 
@@ -30,11 +31,14 @@ public:
 
     std::string get_backend_name() const override { return "PipeWire Native Filter (In-Line)"; }
     std::string get_active_target() const override;
+    std::string get_requested_target() const override;
+    std::string get_output_state() const override;
     uint32_t get_sample_rate() const override { return sample_rate_.load(); }
     uint32_t get_buffer_frames() const override { return buffer_frames_.load(); }
     bool is_running() const override { return running_.load(); }
 
     std::vector<SinkDevice> list_sinks() override;
+    bool set_target(const std::string& target) override;
 
     // Called from real-time process callback
     void process_audio(struct spa_io_position *position);
@@ -42,8 +46,15 @@ public:
     void filter_state_changed(enum pw_filter_state state, const char* error);
 
 private:
+    friend struct PipeWireRoutingTestAccess;
+    struct PortLinks {
+        std::vector<std::string> inputs;
+        std::vector<std::string> outputs;
+    };
+    using LinkGraph = std::map<std::string, PortLinks>;
+    bool service_routing(); // One worker-owned pass; no PipeWire/audio-thread calls.
+    bool reconcile_target(const LinkGraph& graph);
     static bool safe_pw_link(const std::string& src, const std::string& dst, bool disconnect = false);
-    std::string resolve_default_sink();
     bool load_null_sink();
     void unload_null_sink();
     void link_manager_loop();
@@ -53,7 +64,16 @@ private:
     void set_active_target(const std::string& target);
 
     CrossfeedDSP* dsp_ = nullptr;
-    std::string requested_target_;
+    // IPC only publishes requests. The routing worker owns all applied routes.
+    mutable std::mutex request_mutex_;
+    std::string requested_target_ = "auto";
+    std::string applied_request_;
+    std::string auto_preferred_sink_;
+    bool auto_preferred_missing_ = false;
+    std::set<std::string> previous_physical_sinks_;
+    std::string observed_default_sink_;
+    enum class OutputState { Reconnecting, Ready, Waiting };
+    std::atomic<OutputState> output_state_{OutputState::Reconnecting};
     std::string active_target_sink_;
     std::string target_playback_fl_;
     std::string target_playback_fr_;

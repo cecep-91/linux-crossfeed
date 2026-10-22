@@ -232,7 +232,7 @@ static void test_delay_line_interpolation_and_wrap() {
 
     assert(dl.read(2.0f) == 1.0f);
     assert(dl.read(3.0f) == 0.0f);
-    assert(std::abs(dl.read(2.5f) - 0.5f) < 1e-6f);
+    assert(std::abs(dl.read(2.5f) - 0.5625f) < 1e-6f); // Hermite cubic h0(0.5)
 
     // 4. Circular buffer wrap-around past index 2048
     dl.reset();
@@ -488,11 +488,17 @@ static void test_presets() {
     assert(find_preset("linkwitz") != nullptr);
     assert(find_preset("studio") != nullptr);
     assert(find_preset("Studio 30°") != nullptr);
+    assert(find_preset("jm1") != nullptr);
+    assert(find_preset("diffuse") != nullptr);
     assert(find_preset("unknown_nonexistent") == nullptr);
 
     // 2. detect_active_preset matching
     const auto* p_meier = detect_active_preset(-9.5f, 650.0f, 280.0f, 1500.0f, -1.5f, 3200.0f, true);
     assert(p_meier != nullptr && std::string(p_meier->id) == "meier");
+
+    // JM-1 Diffuse
+    const auto* p_jm1 = detect_active_preset(-10.0f, 750.0f, 260.0f, 1600.0f, -1.2f, 3600.0f, true);
+    assert(p_jm1 != nullptr && std::string(p_jm1->id) == "jm1");
 
     // Tolerant matching (within small float tolerances)
     const auto* p_meier_tol = detect_active_preset(-9.52f, 651.0f, 281.0f, 1505.0f, -1.51f, 3210.0f, true);
@@ -569,9 +575,20 @@ static std::complex<double> cross_response(const FilterParams& p, double f) {
     const double fraction = p.delay_samples - integer;
     auto h = static_cast<double>(p.gain2) * biquad_transfer_function(p.cross_coeffs, f, p.sample_rate);
     if (p.advanced_effects) {
+        std::complex<double> frac_filter;
+        if (integer < 1) {
+            frac_filter = 1.0 - fraction + fraction * z;
+        } else {
+            const double f_frac = fraction;
+            const double h_minus1 = -0.5 * f_frac * f_frac * f_frac + 1.0 * f_frac * f_frac - 0.5 * f_frac;
+            const double h_0 = 1.5 * f_frac * f_frac * f_frac - 2.5 * f_frac * f_frac + 1.0;
+            const double h_1 = -1.5 * f_frac * f_frac * f_frac + 2.0 * f_frac * f_frac + 0.5 * f_frac;
+            const double h_2 = 0.5 * f_frac * f_frac * f_frac - 0.5 * f_frac * f_frac;
+            frac_filter = h_minus1 * std::conj(z) + h_0 + h_1 * z + h_2 * z * z;
+        }
         h *= biquad_transfer_function(p.shadow_coeffs, f, p.sample_rate) *
              biquad_transfer_function(p.apf_coeffs, f, p.sample_rate) *
-             std::pow(z, integer) * (1.0 - fraction + fraction * z);
+             std::pow(z, integer) * frac_filter;
     }
     return h;
 }
@@ -633,6 +650,28 @@ static void test_rate_handoff() {
     assert(dsp.service_sample_rate());
     for (int i = 0; i < 12; ++i) dsp.process_interleaved(in.data(), out.data(), 256);
     assert(out != in && dsp.get_level_db() == -15);
+
+    // Verify that requested cutoffs are not permanently destroyed by a temporary sample-rate dip:
+    assert(dsp.set_all_params(48000, -10.0f, 700.0f, 280.0f, 3000.0f, -1.5f, 3800.0f, true, true));
+    assert(dsp.get_requested_params().shadow_hz == 3800.0f);
+    assert(dsp.get_requested_params().phase_apf_hz == 3000.0f);
+    assert(dsp.get_params().shadow_hz == 3800.0f);
+
+    // Drop to 8000 Hz: ceiling is 3600 Hz
+    dsp.request_sample_rate(8000);
+    assert(dsp.service_sample_rate());
+    assert(dsp.get_params().sample_rate == 8000.0f);
+    assert(dsp.get_params().shadow_hz <= 3600.0f);
+    assert(dsp.get_params().phase_apf_hz <= 3600.0f);
+    assert(dsp.get_requested_params().shadow_hz == 3800.0f);
+    assert(dsp.get_requested_params().phase_apf_hz == 3000.0f);
+
+    // Restore to 48000 Hz: cutoffs must recover to original values!
+    dsp.request_sample_rate(48000);
+    assert(dsp.service_sample_rate());
+    assert(dsp.get_params().sample_rate == 48000.0f);
+    assert(dsp.get_params().shadow_hz == 3800.0f);
+    assert(dsp.get_params().phase_apf_hz == 3000.0f);
 }
 
 static void test_smooth_transitions() {
@@ -682,6 +721,31 @@ static void test_denormal_scope() {
     for (float x : out) assert(!is_invalid_float(x));
 }
 
+static void test_soft_knee_limiter() {
+    std::cout << "[TEST] Soft-knee limiter ceiling and transparency...\n";
+    CrossfeedDSP dsp;
+    assert(dsp.set_all_params(48000, -10.0f, 700.0f, 280.0f, 1500.0f, -1.5f, 3000.0f, true, true, true));
+    assert(dsp.get_limiter());
+    std::array<float, 512> in, out;
+
+    // Transparent below knee threshold T = 0.95
+    in.fill(0.70f);
+    dsp.process_interleaved(in.data(), out.data(), 256);
+    for (int i = 20; i < 256; ++i) {
+        assert(std::abs(out[2*i]) < 0.95f);
+    }
+
+    // Limit extreme inputs strictly below 1.0
+    for (float hot : {1.2f, 1.5f, 2.0f, 5.0f, 10.0f}) {
+        in.fill(hot);
+        dsp.process_interleaved(in.data(), out.data(), 256);
+        for (int i = 0; i < 256; ++i) {
+            assert(std::abs(out[2*i]) < 1.0f);
+            assert(std::abs(out[2*i+1]) < 1.0f);
+        }
+    }
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "Running Crossfeed DSP & Core Test Suite" << std::endl;
@@ -700,6 +764,7 @@ int main() {
     test_rate_handoff();
     test_smooth_transitions();
     test_denormal_scope();
+    test_soft_knee_limiter();
 
     std::cout << "========================================" << std::endl;
     std::cout << "All DSP and core characterization tests passed!" << std::endl;

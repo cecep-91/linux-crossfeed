@@ -64,7 +64,9 @@
         if (preview_mode) {
             if (command == "AB STORE A" || command == "AB STORE B") {
                 unsigned slot = command.back() == 'A' ? 0 : 1;
-                preview_slots[slot] = current_sound(); state.slots[slot] = true;
+                preview_slots[slot] = current_sound();
+                state.slot_params[slot] = current_sound();
+                state.slots[slot] = true;
             } else if (command == "AB A" || command == "AB B") {
                 unsigned slot = command.back() == 'A' ? 0 : 1;
                 if (!state.slots[slot]) return false;
@@ -75,6 +77,11 @@
                 state.enabled = command == "ON";
             }
             update_ui(); return true;
+        }
+        if (command == "AB STORE A" || command == "AB STORE B") {
+            unsigned slot = command.back() == 'A' ? 0 : 1;
+            state.slot_params[slot] = current_sound();
+            state.slots[slot] = true;
         }
         // Flush a pending slider update before a store/recall transaction.
         if (slider_ipc_timeout_id) {
@@ -150,8 +157,7 @@
     GtkWidget* build_listening() {
         listening_card = make_card();
         GtkWidget* card = listening_card;
-        gtk_box_pack_start(GTK_BOX(card), make_label("Hear the difference", "cf-heading"), FALSE, FALSE, 0);
-        gtk_box_pack_start(GTK_BOX(card), make_label("Listen with or without crossfeed. Original audio follows the selected settings’ output trim.", "dim-label"), FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(card), make_label("A/B Audition", "cf-heading"), FALSE, FALSE, 0);
         GtkWidget* choices = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
         gtk_box_set_homogeneous(GTK_BOX(choices), TRUE);
         add_class(choices, "linked");
@@ -164,8 +170,8 @@
             gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(button), FALSE);
             atk_object_set_name(gtk_widget_get_accessible(button), labels[i]);
             gtk_widget_set_tooltip_text(button, i == 0 ?
-                "Hear your music without crossfeed. The same active output trim and Output volume still apply." :
-                "Hear your music with the selected crossfeed settings.");
+                "Bypass crossfeed (Original audio). Output trim and volume still apply." :
+                "Active crossfeed processing.");
             g_object_set_data_full(G_OBJECT(button), "listening-command", g_strdup(commands[i]), g_free);
             g_signal_connect(button, "toggled", G_CALLBACK(+[](GtkToggleButton* b, gpointer data) {
                 auto* app = static_cast<CrossfeedGuiApp*>(data);
@@ -180,26 +186,24 @@
         trim_label = make_label("", "dim-label");
         gtk_box_pack_start(GTK_BOX(card), trim_label, FALSE, FALSE, 0);
 
-        compare_expander = gtk_expander_new("Compare two settings (optional)");
-        GtkWidget* comparison = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-        gtk_widget_set_margin_top(comparison, 10);
-        gtk_box_pack_start(GTK_BOX(comparison), make_label(
-            "1. Choose a preset or adjust the sound, then save it as A.\n2. Try different settings and save them as B.\n3. Switch between A and B. Original audio follows the last selected setting’s trim.", "dim-label"), FALSE, FALSE, 0);
+        compare_expander = gtk_expander_new("A/B Quick Slots");
+        gtk_widget_set_tooltip_text(compare_expander, "Store current settings into session slots A and B for fast A/B comparison.");
+        GtkWidget* comparison = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+        gtk_widget_set_margin_top(comparison, 8);
         GtkWidget* slots = responsive_grid();
         for (unsigned i = 0; i < 2; ++i) {
-            GtkWidget* column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
-            gtk_box_pack_start(GTK_BOX(column), make_label(i == 0 ? "First setting · A" : "Second setting · B", "cf-heading"), FALSE, FALSE, 0);
+            GtkWidget* column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+            gtk_box_pack_start(GTK_BOX(column), make_label(i == 0 ? "Slot A" : "Slot B", "cf-heading"), FALSE, FALSE, 0);
             slot_labels[i] = make_label("No settings saved yet.", "dim-label");
             gtk_box_pack_start(GTK_BOX(column), slot_labels[i], FALSE, FALSE, 0);
             store_buttons[i] = listening_button(i == 0 ? "Save current as A" : "Save current as B", i == 0 ? "AB STORE A" : "AB STORE B");
-            gtk_widget_set_tooltip_text(store_buttons[i], "Remember the current filter settings here. Output volume stays shared between both choices.");
+            gtk_widget_set_tooltip_text(store_buttons[i], "Remember current settings in this slot. Preamp stays shared.");
             comparison_buttons[i + 2] = listening_button(i == 0 ? "Listen to A" : "Listen to B", i == 0 ? "AB A" : "AB B");
             gtk_box_pack_start(GTK_BOX(column), store_buttons[i], FALSE, FALSE, 0);
             gtk_box_pack_start(GTK_BOX(column), comparison_buttons[i + 2], FALSE, FALSE, 0);
             gtk_container_add(GTK_CONTAINER(slots), column);
         }
         gtk_box_pack_start(GTK_BOX(comparison), slots, FALSE, FALSE, 0);
-        gtk_box_pack_start(GTK_BOX(comparison), make_label("A and B last until the engine stops. Use My presets to keep a favorite for next time.", "dim-label"), FALSE, FALSE, 0);
         gtk_container_add(GTK_CONTAINER(compare_expander), comparison);
         gtk_box_pack_start(GTK_BOX(card), compare_expander, FALSE, FALSE, 0);
 
@@ -368,7 +372,8 @@
     }
 
     GtkWidget* build_library() {
-        GtkWidget* expander = gtk_expander_new("My presets");
+        // The saved collection has its own workspace page; no nested disclosure.
+
         GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
         gtk_widget_set_margin_top(box, 10);
         library_combo = gtk_combo_box_text_new();
@@ -415,6 +420,5 @@
         gtk_box_pack_start(GTK_BOX(box), actions, FALSE, FALSE, 0);
         library_label = make_label("", "dim-label");
         gtk_box_pack_start(GTK_BOX(box), library_label, FALSE, FALSE, 0);
-        gtk_container_add(GTK_CONTAINER(expander), box);
-        refresh_library(); return expander;
+        refresh_library(); return box;
     }

@@ -116,8 +116,12 @@ test-rt: bin/test_rt
 test-cli: $(TARGET)
 	python3 test/test_cli.py
 
-test-routing: $(TARGET)
+bin/test_pipewire_routing: test/pipewire_routing_driver.cpp src/pipewire_backend.cpp src/pipewire_backend.hpp src/audio_backend.hpp src/dsp.cpp src/dsp.hpp Makefile | bin
+	$(CXX) $(CXXFLAGS) $(PW_CFLAGS) $(LDFLAGS) -Isrc test/pipewire_routing_driver.cpp src/pipewire_backend.cpp src/dsp.cpp $(PW_LIBS) -o $@
+
+test-routing: $(TARGET) bin/test_pipewire_routing
 	python3 test/test_pipewire_lifecycle.py
+	python3 test/test_pipewire_routing.py
 
 $(TEST_TARGET): $(TEST_SRCS) $(wildcard src/*.hpp) Makefile | bin
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -Isrc $(TEST_SRCS) -o $@

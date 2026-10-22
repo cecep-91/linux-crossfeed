@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <map>
 #include <cctype>
+#include <algorithm>
 
 #ifndef PW_KEY_PORT_PASSIVE
 #define PW_KEY_PORT_PASSIVE "port.passive"
@@ -30,43 +31,144 @@ static inline void run_sys_cmd(const std::string& cmd) {
     (void)res;
 }
 
-static std::string find_best_physical_sink() {
-    FILE* fp = popen("pw-link -i 2>/dev/null | grep playback_FL | cut -d: -f1", "r");
-    if (!fp) return "";
-    char buf[256] = {0};
-    std::string fallback_sink;
-    std::string preferred_sink;
+static int score_physical_sink(const std::string& name) {
+    if (name.empty()) return -1;
+    if (name == "crossfeed" || name == "crossfeed_sink" || name == "Crossfeed") return -1;
 
+    std::string lower = name;
+    for (char& c : lower) c = std::tolower(static_cast<unsigned char>(c));
+
+    int score = 1000;
+
+    // USB Audio Interfaces / DACs (e.g. FiiO, Topping, Schiit, Dragonfly, Focusrite, etc.)
+    if (lower.find("usb") != std::string::npos ||
+        lower.find("dac") != std::string::npos ||
+        lower.find("fiio") != std::string::npos ||
+        lower.find("topping") != std::string::npos ||
+        lower.find("dragonfly") != std::string::npos ||
+        lower.find("audioquest") != std::string::npos ||
+        lower.find("focusrite") != std::string::npos ||
+        lower.find("schiit") != std::string::npos ||
+        lower.find("motu") != std::string::npos ||
+        lower.find("rme") != std::string::npos ||
+        lower.find("soundblaster") != std::string::npos ||
+        lower.find("creative") != std::string::npos) {
+        score += 4000;
+    }
+
+    // Bluetooth Audio (A2DP headphones/headset)
+    if (lower.find("bluez") != std::string::npos ||
+        lower.find("bluetooth") != std::string::npos ||
+        lower.find("a2dp") != std::string::npos) {
+        score += 3000;
+    }
+
+    // Built-in Headphones / Headset
+    if (lower.find("headphone") != std::string::npos ||
+        lower.find("headphones") != std::string::npos ||
+        lower.find("headset") != std::string::npos) {
+        score += 2500;
+    }
+
+    // Analog line out / Stereo
+    if (lower.find("analog") != std::string::npos ||
+        lower.find("lineout") != std::string::npos) {
+        score += 1500;
+    }
+
+    // Built-in Speaker
+    if (lower.find("speaker") != std::string::npos) {
+        score += 500;
+    }
+
+    // HDMI / DisplayPort (least preferred for crossfeed headphone listening)
+    if (lower.find("hdmi") != std::string::npos ||
+        lower.find("displayport") != std::string::npos ||
+        lower.find("dp") != std::string::npos) {
+        score -= 800;
+    }
+
+    return score;
+}
+
+static bool is_crossfeed_sink(const std::string& name) {
+    return name == "crossfeed" || name == "crossfeed_sink" || name == "Crossfeed" || name == "crossfeed-dsp";
+}
+
+struct OutputRoute { std::string sink, left, right; };
+
+// Enumerate one coherent port listing. A reappearing node may initially expose
+// just one channel, and its channel names can change with its device profile.
+static bool get_output_routes(std::vector<OutputRoute>& routes) {
+    FILE* fp = popen("pw-link -i 2>/dev/null", "r");
+    if (!fp) return false;
+    std::set<std::string> ports;
+    char buf[1024];
     while (fgets(buf, sizeof(buf), fp)) {
-        std::string s(buf);
-        while (!s.empty() && (s.back() == '\r' || s.back() == '\n' || s.back() == ' ')) s.pop_back();
-        if (s.empty() || !is_valid_port_name(s)) continue;
-        if (s == "crossfeed" || s == "crossfeed_sink" || s == "Crossfeed") continue;
-
-        if (fallback_sink.empty()) {
-            fallback_sink = s;
-        }
-
-        std::string lower = s;
-        for (char& c : lower) c = std::tolower(static_cast<unsigned char>(c));
-
-        // Prefer headphone, speaker, analog, and non-HDMI outputs
-        if (lower.find("hdmi") == std::string::npos) {
-            if (lower.find("headphone") != std::string::npos ||
-                lower.find("speaker") != std::string::npos ||
-                lower.find("analog") != std::string::npos) {
-                pclose(fp);
-                return s; // Ideal match found
-            }
-            if (preferred_sink.empty()) {
-                preferred_sink = s;
+        std::string port(buf);
+        while (!port.empty() && std::isspace(static_cast<unsigned char>(port.back()))) port.pop_back();
+        if (is_valid_port_name(port)) ports.insert(port);
+    }
+    if (pclose(fp) != 0) return false;
+    const std::pair<const char*, const char*> channels[] = {
+        {"playback_FL", "playback_FR"}, {"playback_0", "playback_1"}, {"playback_AUX0", "playback_AUX1"}
+    };
+    std::set<std::string> sinks;
+    for (const auto& port : ports) {
+        const auto colon = port.rfind(':');
+        if (colon != std::string::npos && !is_crossfeed_sink(port.substr(0, colon)))
+            sinks.insert(port.substr(0, colon));
+    }
+    for (const auto& sink : sinks) {
+        for (const auto& pair : channels) {
+            const std::string left = sink + ":" + pair.first, right = sink + ":" + pair.second;
+            if (ports.count(left) && ports.count(right)) {
+                routes.push_back({sink, left, right});
+                break;
             }
         }
     }
-    pclose(fp);
+    return true;
+}
 
-    if (!preferred_sink.empty()) return preferred_sink;
-    return fallback_sink;
+static std::vector<std::string> get_available_physical_sinks() {
+    std::vector<OutputRoute> routes;
+    get_output_routes(routes);
+    std::vector<std::string> sinks;
+    for (const auto& route : routes) sinks.push_back(route.sink);
+    return sinks;
+}
+
+static std::string system_default_sink() {
+    FILE* fp = popen("LC_ALL=C pactl info 2>/dev/null", "r");
+    if (!fp) return {};
+    std::string sink;
+    char buf[1024];
+    const std::string prefix = "Default Sink:";
+    while (fgets(buf, sizeof(buf), fp)) {
+        std::string line(buf);
+        if (line.compare(0, prefix.size(), prefix) != 0) continue;
+        sink = line.substr(prefix.size());
+        while (!sink.empty() && std::isspace(static_cast<unsigned char>(sink.back()))) sink.pop_back();
+        const auto begin = sink.find_first_not_of(" \t");
+        sink = begin == std::string::npos ? "" : sink.substr(begin);
+    }
+    if (pclose(fp) != 0 || !is_valid_port_name(sink)) return {};
+    return sink;
+}
+
+static std::string find_best_physical_sink() {
+    const auto sinks = get_available_physical_sinks();
+    std::string best_sink;
+    int best_score = -1;
+    for (const auto& s : sinks) {
+        int sc = score_physical_sink(s);
+        if (sc > best_score) {
+            best_score = sc;
+            best_sink = s;
+        }
+    }
+    return best_sink;
 }
 
 bool PipeWireBackend::safe_pw_link(const std::string& src, const std::string& dst, bool disconnect) {
@@ -118,37 +220,17 @@ void PipeWireBackend::set_active_target(const std::string& target) {
     reported_target_ = target;
 }
 
-std::string PipeWireBackend::resolve_default_sink() {
-    auto is_self = [](const std::string& name) {
-        return name == "crossfeed" || name == "crossfeed_sink" || name == "Crossfeed";
-    };
+std::string PipeWireBackend::get_requested_target() const {
+    std::lock_guard<std::mutex> lock(request_mutex_);
+    return requested_target_;
+}
 
-    FILE* fp = popen("pactl info 2>/dev/null | grep 'Default Sink:' | cut -d' ' -f3", "r");
-    if (fp) {
-        char buf[256] = {0};
-        if (fgets(buf, sizeof(buf), fp)) {
-            pclose(fp);
-            std::string s(buf);
-            while (!s.empty() && (s.back() == '\r' || s.back() == '\n' || s.back() == ' ')) s.pop_back();
-            if (!s.empty() && is_valid_port_name(s)) {
-                if (is_self(s)) {
-                    // Default sink is currently crossfeed itself, so no device change occurred.
-                    if (!active_target_sink_.empty()) {
-                        return active_target_sink_;
-                    }
-                    return find_best_physical_sink();
-                }
-                return s;
-            }
-        } else {
-            pclose(fp);
-        }
+std::string PipeWireBackend::get_output_state() const {
+    switch (output_state_.load()) {
+        case OutputState::Ready: return "ready";
+        case OutputState::Waiting: return "waiting";
+        default: return "reconnecting";
     }
-
-    if (!active_target_sink_.empty()) {
-        return active_target_sink_;
-    }
-    return find_best_physical_sink();
 }
 
 bool PipeWireBackend::load_null_sink() {
@@ -235,51 +317,127 @@ void PipeWireBackend::unload_null_sink() {
 
 std::vector<SinkDevice> PipeWireBackend::list_sinks() {
     std::vector<SinkDevice> sinks;
-    FILE* fp = popen("pw-link -i 2>/dev/null | grep playback_FL | cut -d: -f1", "r");
-    if (!fp) return sinks;
-    char buf[256];
-    std::string def = resolve_default_sink();
-    while (fgets(buf, sizeof(buf), fp)) {
-        std::string s(buf);
-        while (!s.empty() && (s.back() == '\r' || s.back() == '\n' || s.back() == ' ')) s.pop_back();
-        if (!s.empty() && is_valid_port_name(s) && s != "crossfeed" && s != "Crossfeed" && s != "crossfeed_sink") {
-            SinkDevice dev;
-            dev.name = s;
-            dev.description = s;
-            dev.is_default = (s == def);
-            sinks.push_back(dev);
+    const auto raw_sinks = get_available_physical_sinks();
+    std::string current_target = get_active_target();
+    for (const auto& s : raw_sinks) {
+        SinkDevice dev;
+        dev.name = s;
+        dev.description = s;
+        dev.is_default = (s == current_target);
+        sinks.push_back(dev);
+    }
+    return sinks;
+}
+
+bool PipeWireBackend::set_target(const std::string& target) {
+    const std::string requested = target.empty() ? "auto" : target;
+    if (requested != "auto" && (!is_valid_port_name(requested) || is_crossfeed_sink(requested))) return false;
+    std::lock_guard<std::mutex> lock(request_mutex_);
+    requested_target_ = requested;
+    return true;
+}
+
+bool PipeWireBackend::reconcile_target(const LinkGraph& graph) {
+    std::vector<OutputRoute> routes;
+    if (!get_output_routes(routes)) {
+        output_state_.store(OutputState::Reconnecting);
+        return false; // A failed query is not proof that a device was unplugged.
+    }
+    observed_default_sink_ = system_default_sink();
+    // The server also changes its default automatically during unplug/replug.
+    // After initial selection, keep Auto's remembered preference rather than
+    // interpreting a transient fallback default as an explicit user request.
+    const auto find_route = [&](const std::string& name) -> const OutputRoute* {
+        for (const auto& route : routes) if (route.sink == name) return &route;
+        return nullptr;
+    };
+    const OutputRoute* best = nullptr;
+    for (const auto& route : routes)
+        if (!best || score_physical_sink(route.sink) > score_physical_sink(best->sink)) best = &route;
+
+    const std::string requested = get_requested_target();
+    if (requested != applied_request_) {
+        applied_request_ = requested;
+        auto_preferred_sink_.clear();
+        auto_preferred_missing_ = false;
+    }
+    const OutputRoute* desired = nullptr;
+    if (requested != "auto") {
+        desired = find_route(requested);
+    } else {
+        const auto* system_default = find_route(observed_default_sink_);
+        const auto* preferred = find_route(auto_preferred_sink_);
+        const bool returning = preferred && (auto_preferred_missing_ || active_target_sink_ != auto_preferred_sink_);
+        if (auto_preferred_sink_.empty()) {
+            desired = system_default ? system_default : best;
+            if (desired) auto_preferred_sink_ = desired->sink;
+        } else if (!preferred) {
+            auto_preferred_missing_ = true;
+            desired = best; // Temporary fallback; remember the disconnected DAC.
+        } else {
+            desired = preferred;
+            if (!returning && best && !previous_physical_sinks_.count(best->sink) &&
+                score_physical_sink(best->sink) > score_physical_sink(preferred->sink)) {
+                desired = best;
+                auto_preferred_sink_ = desired->sink;
+            }
         }
     }
-    pclose(fp);
-    return sinks;
+    previous_physical_sinks_.clear();
+    for (const auto& route : routes) previous_physical_sinks_.insert(route.sink);
+
+    const auto linked = [&](const std::string& source, const std::string& destination) {
+        const auto found = graph.find(source);
+        return found != graph.end() && std::find(found->second.outputs.begin(), found->second.outputs.end(), destination) != found->second.outputs.end();
+    };
+    if (!desired) {
+        // An explicit missing target waits rather than playing on another device.
+        for (const char* source : {"crossfeed-dsp:out_FL", "crossfeed-dsp:out_FR"}) {
+            const auto found = graph.find(source);
+            if (found != graph.end()) for (const auto& destination : found->second.outputs)
+                safe_pw_link(source, destination, true);
+        }
+        output_state_.store(OutputState::Waiting);
+        return false;
+    }
+
+    // Connect both new channels before retiring a working route. On partial
+    // failure, undo only links created by this attempt and retry next pass.
+    const bool had_left = linked("crossfeed-dsp:out_FL", desired->left);
+    const bool had_right = linked("crossfeed-dsp:out_FR", desired->right);
+    const bool left = had_left || safe_pw_link("crossfeed-dsp:out_FL", desired->left);
+    const bool right = had_right || safe_pw_link("crossfeed-dsp:out_FR", desired->right);
+    if (!left || !right) {
+        if (left && !had_left) safe_pw_link("crossfeed-dsp:out_FL", desired->left, true);
+        if (right && !had_right) safe_pw_link("crossfeed-dsp:out_FR", desired->right, true);
+        output_state_.store(OutputState::Reconnecting);
+        return false;
+    }
+    for (const auto& channel : {std::make_pair("crossfeed-dsp:out_FL", desired->left),
+                                std::make_pair("crossfeed-dsp:out_FR", desired->right)}) {
+        const auto found = graph.find(channel.first);
+        if (found != graph.end()) for (const auto& destination : found->second.outputs)
+            if (destination != channel.second) safe_pw_link(channel.first, destination, true);
+    }
+    if (desired->sink == auto_preferred_sink_) auto_preferred_missing_ = false;
+    set_active_target(desired->sink);
+    original_default_sink_ = desired->sink;
+    target_playback_fl_ = desired->left;
+    target_playback_fr_ = desired->right;
+    return true;
 }
 
 bool PipeWireBackend::init(CrossfeedDSP* dsp, const std::string& target_sink, uint32_t sample_rate, uint32_t buffer_frames) {
     dsp_ = dsp;
     sample_rate_ = sample_rate;
     buffer_frames_ = buffer_frames;
-    requested_target_ = target_sink;
-
-    if (!requested_target_.empty() && requested_target_ != "auto") {
-        if (!is_valid_port_name(requested_target_)) {
-            std::cerr << "[crossfeed] Error: Invalid target sink name: " << requested_target_ << std::endl;
-            return false;
-        }
-        set_active_target(requested_target_);
-    } else {
-        set_active_target(resolve_default_sink());
-    }
-
-    if (active_target_sink_.empty() || !is_valid_port_name(active_target_sink_)) {
-        std::cerr << "[crossfeed] Error: Could not determine active output device." << std::endl;
+    if (!set_target(target_sink)) {
+        std::cerr << "[crossfeed] Error: Invalid target sink name.\n";
         return false;
     }
-
-    original_default_sink_ = active_target_sink_;
-    target_playback_fl_ = active_target_sink_ + ":playback_FL";
-    target_playback_fr_ = active_target_sink_ + ":playback_FR";
-
-    std::cout << "[crossfeed] Native PipeWire filter active for device: " << active_target_sink_ << std::endl;
+    // Keep the service alive if no output is present yet. Routing is activated
+    // only after the worker has verified the complete stereo bridge.
+    std::cout << "[crossfeed] Native PipeWire filter waiting for output routing.\n";
 
     if (!load_null_sink()) {
         std::cerr << "[crossfeed] Failed to initialize 'crossfeed' virtual sink." << std::endl;
@@ -421,198 +579,163 @@ void PipeWireBackend::process_audio(struct spa_io_position *position) {
 }
 
 void PipeWireBackend::link_manager_loop() {
-    // Initial delay for filter registration in the graph
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
-
-    if (stop_requested_.load()) return;
-    bool bridged = safe_pw_link("crossfeed:monitor_FL", "crossfeed-dsp:in_FL");
-    bridged = safe_pw_link("crossfeed:monitor_FR", "crossfeed-dsp:in_FR") && bridged;
-    bridged = safe_pw_link("crossfeed-dsp:out_FL", target_playback_fl_) && bridged;
-    bridged = safe_pw_link("crossfeed-dsp:out_FR", target_playback_fr_) && bridged;
-    if (!bridged) {
-        std::cerr << "[crossfeed] Could not establish all stereo bridge links.\n";
-        failed_.store(true);
-        stop();
-        return;
-    }
-    activate_routing();
-
-    struct PortLinks {
-        std::vector<std::string> inputs;
-        std::vector<std::string> outputs;
-    };
-
+    int consecutive_stable = 0;
     while (!stop_requested_.load()) {
-        // Dynamically follow default physical output device if requested target is auto
-        if (requested_target_.empty() || requested_target_ == "auto") {
-            std::string cur_def = resolve_default_sink();
-            if (!cur_def.empty() && is_valid_port_name(cur_def) && cur_def != active_target_sink_) {
-                safe_pw_link("crossfeed-dsp:out_FL", target_playback_fl_, true);
-                safe_pw_link("crossfeed-dsp:out_FR", target_playback_fr_, true);
-
-                set_active_target(cur_def);
-                original_default_sink_ = cur_def;
-                target_playback_fl_ = active_target_sink_ + ":playback_FL";
-                target_playback_fr_ = active_target_sink_ + ":playback_FR";
-
-                safe_pw_link("crossfeed-dsp:out_FL", target_playback_fl_);
-                safe_pw_link("crossfeed-dsp:out_FR", target_playback_fr_);
-
-                // Re-assert crossfeed as default sink so subsequent new streams go to crossfeed
-                run_sys_cmd("pactl set-default-sink crossfeed 2>/dev/null");
-            }
-        }
-
-        // Parse PipeWire link graph to ensure bridge links remain intact
-        std::map<std::string, PortLinks> graph;
-        FILE* fp = popen("pw-link -l 2>/dev/null", "r");
-        if (fp) {
-            char line[512];
-            std::string current_port;
-
-            while (fgets(line, sizeof(line), fp)) {
-                std::string l(line);
-                while (!l.empty() && (l.back() == '\r' || l.back() == '\n')) l.pop_back();
-                if (l.empty()) continue;
-
-                if (l.find("|<-") != std::string::npos) {
-                    size_t pos = l.find("|<-");
-                    std::string target = l.substr(pos + 3);
-                    while (!target.empty() && target.front() == ' ') target.erase(target.begin());
-                    while (!target.empty() && target.back() == ' ') target.pop_back();
-                    if (!current_port.empty() && !target.empty() && is_valid_port_name(target)) {
-                        graph[current_port].inputs.push_back(target);
-                    }
-                } else if (l.find("|->") != std::string::npos) {
-                    size_t pos = l.find("|->");
-                    std::string target = l.substr(pos + 3);
-                    while (!target.empty() && target.front() == ' ') target.erase(target.begin());
-                    while (!target.empty() && target.back() == ' ') target.pop_back();
-                    if (!current_port.empty() && !target.empty() && is_valid_port_name(target)) {
-                        graph[current_port].outputs.push_back(target);
-                    }
-                } else if (l[0] != ' ' && l[0] != '\t' && l[0] != '|') {
-                    current_port = l;
-                    while (!current_port.empty() && current_port.back() == ' ') current_port.pop_back();
-                }
-            }
-            pclose(fp);
-        }
-
-        // 1. Maintain input bridge: crossfeed:monitor -> crossfeed-dsp:in
-        // Ensure ONLY crossfeed:monitor is connected to crossfeed-dsp:in.
-        // If rogue streams connected directly to crossfeed-dsp:in, redirect them to crossfeed virtual sink.
-        bool in_fl_linked = false;
-        auto in_fl_it = graph.find("crossfeed-dsp:in_FL");
-        if (in_fl_it != graph.end()) {
-            for (const auto& src : in_fl_it->second.inputs) {
-                if (src == "crossfeed:monitor_FL") {
-                    in_fl_linked = true;
-                } else {
-                    // Rogue stream bypassing virtual mixer directly into DSP port!
-                    safe_pw_link(src, "crossfeed-dsp:in_FL", true);
-                    safe_pw_link(src, "crossfeed:playback_FL");
-                }
-            }
-        }
-        if (!in_fl_linked) {
-            safe_pw_link("crossfeed:monitor_FL", "crossfeed-dsp:in_FL");
-        }
-
-        bool in_fr_linked = false;
-        auto in_fr_it = graph.find("crossfeed-dsp:in_FR");
-        if (in_fr_it != graph.end()) {
-            for (const auto& src : in_fr_it->second.inputs) {
-                if (src == "crossfeed:monitor_FR") {
-                    in_fr_linked = true;
-                } else {
-                    safe_pw_link(src, "crossfeed-dsp:in_FR", true);
-                    safe_pw_link(src, "crossfeed:playback_FR");
-                }
-            }
-        }
-        if (!in_fr_linked) {
-            safe_pw_link("crossfeed:monitor_FR", "crossfeed-dsp:in_FR");
-        }
-
-        // 2. Maintain output bridge: crossfeed-dsp:out -> target_playback
-        bool out_fl_linked = false;
-        auto out_fl_it = graph.find("crossfeed-dsp:out_FL");
-        if (out_fl_it != graph.end()) {
-            for (const auto& dst : out_fl_it->second.outputs) {
-                if (dst == target_playback_fl_) { out_fl_linked = true; break; }
-            }
-        }
-        if (!out_fl_linked) {
-            safe_pw_link("crossfeed-dsp:out_FL", target_playback_fl_);
-        }
-
-        bool out_fr_linked = false;
-        auto out_fr_it = graph.find("crossfeed-dsp:out_FR");
-        if (out_fr_it != graph.end()) {
-            for (const auto& dst : out_fr_it->second.outputs) {
-                if (dst == target_playback_fr_) { out_fr_linked = true; break; }
-            }
-        }
-        if (!out_fr_linked) {
-            safe_pw_link("crossfeed-dsp:out_FR", target_playback_fr_);
-        }
-
-        // 3. Auto-reroute any stream playing directly to target physical sink into crossfeed virtual sink
-        bool rogue_target_found = false;
-        if (!target_playback_fl_.empty()) {
-            auto tgt_fl_it = graph.find(target_playback_fl_);
-            if (tgt_fl_it != graph.end()) {
-                for (const auto& src : tgt_fl_it->second.inputs) {
-                    if (src.find("crossfeed") == std::string::npos && is_valid_port_name(src)) {
-                        const std::string redirected = "crossfeed:playback_FL";
-                        if (safe_pw_link(src, redirected)) {
-                            if (safe_pw_link(src, target_playback_fl_, true)) {
-                                rerouted_links_.push_back({src, target_playback_fl_, redirected});
-                                rogue_target_found = true;
-                            } else {
-                                safe_pw_link(src, redirected, true);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (!target_playback_fr_.empty()) {
-            auto tgt_fr_it = graph.find(target_playback_fr_);
-            if (tgt_fr_it != graph.end()) {
-                for (const auto& src : tgt_fr_it->second.inputs) {
-                    if (src.find("crossfeed") == std::string::npos && is_valid_port_name(src)) {
-                        const std::string redirected = "crossfeed:playback_FR";
-                        if (safe_pw_link(src, redirected)) {
-                            if (safe_pw_link(src, target_playback_fr_, true)) {
-                                rerouted_links_.push_back({src, target_playback_fr_, redirected});
-                                rogue_target_found = true;
-                            } else {
-                                safe_pw_link(src, redirected, true);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // If rogue streams bypassed Crossfeed to play directly to physical sink,
-        // also instruct PulseAudio / WirePlumber to migrate sink-inputs bound to physical sinks to crossfeed
-        // so WirePlumber updates its stream restore preference.
-        if (rogue_target_found) {
-            std::string move_cmd =
-                "cf_idx=$(pactl list short sinks 2>/dev/null | grep -w 'crossfeed' | awk '{print $1}'); "
-                "ee_idx=$(pactl list short sinks 2>/dev/null | grep -w 'easyeffects_sink' | awk '{print $1}'); "
-                "pactl list short sink-inputs 2>/dev/null | while read -r id s_idx rest; do "
-                "  [ -n \"$id\" ] && [ -n \"$s_idx\" ] && [ \"$s_idx\" != \"$cf_idx\" ] && [ \"$s_idx\" != \"$ee_idx\" ] && pactl move-sink-input \"$id\" crossfeed 2>/dev/null; "
-                "done";
-            run_sys_cmd(move_cmd);
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        // Discovery runs on EVERY pass, even after an arbitrarily long stable
+        // session. Health-based backoff must never disable hotplug detection.
+        const bool healthy = service_routing();
+        consecutive_stable = healthy ? std::min(consecutive_stable + 1, 4) : 0;
+        const int sleep_ms = consecutive_stable >= 4 ? 1000 : 250;
+        for (int elapsed = 0; elapsed < sleep_ms && !stop_requested_.load(); elapsed += 50)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
+}
+
+bool PipeWireBackend::service_routing() {
+    if (stop_requested_.load()) return false;
+    // Parse PipeWire link graph to ensure bridge links remain intact
+    LinkGraph graph;
+    FILE* fp = popen("pw-link -l 2>/dev/null", "r");
+    if (fp) {
+        char line[512];
+        std::string current_port;
+
+        while (fgets(line, sizeof(line), fp)) {
+            std::string l(line);
+            while (!l.empty() && (l.back() == '\r' || l.back() == '\n')) l.pop_back();
+            if (l.empty()) continue;
+
+            if (l.find("|<-") != std::string::npos) {
+                size_t pos = l.find("|<-");
+                std::string target = l.substr(pos + 3);
+                while (!target.empty() && target.front() == ' ') target.erase(target.begin());
+                while (!target.empty() && target.back() == ' ') target.pop_back();
+                if (!current_port.empty() && !target.empty() && is_valid_port_name(target)) {
+                    graph[current_port].inputs.push_back(target);
+                }
+            } else if (l.find("|->") != std::string::npos) {
+                size_t pos = l.find("|->");
+                std::string target = l.substr(pos + 3);
+                while (!target.empty() && target.front() == ' ') target.erase(target.begin());
+                while (!target.empty() && target.back() == ' ') target.pop_back();
+                if (!current_port.empty() && !target.empty() && is_valid_port_name(target)) {
+                    graph[current_port].outputs.push_back(target);
+                }
+            } else if (l[0] != ' ' && l[0] != '\t' && l[0] != '|') {
+                current_port = l;
+                while (!current_port.empty() && current_port.back() == ' ') current_port.pop_back();
+            }
+        }
+        if (pclose(fp) != 0) {
+            output_state_.store(OutputState::Reconnecting);
+            return false;
+        }
+    } else {
+        output_state_.store(OutputState::Reconnecting);
+        return false;
+    }
+    const bool output_ready = reconcile_target(graph);
+
+    // 1. Maintain input bridge: crossfeed:monitor -> crossfeed-dsp:in
+    // Ensure ONLY crossfeed:monitor is connected to crossfeed-dsp:in.
+    // If rogue streams connected directly to crossfeed-dsp:in, redirect them to crossfeed virtual sink.
+    bool in_fl_linked = false;
+    auto in_fl_it = graph.find("crossfeed-dsp:in_FL");
+    if (in_fl_it != graph.end()) {
+        for (const auto& src : in_fl_it->second.inputs) {
+            if (src == "crossfeed:monitor_FL") {
+                in_fl_linked = true;
+            } else {
+                // Rogue stream bypassing virtual mixer directly into DSP port!
+                safe_pw_link(src, "crossfeed-dsp:in_FL", true);
+                safe_pw_link(src, "crossfeed:playback_FL");
+            }
+        }
+    }
+    if (!in_fl_linked) {
+        in_fl_linked = safe_pw_link("crossfeed:monitor_FL", "crossfeed-dsp:in_FL");
+    }
+
+    bool in_fr_linked = false;
+    auto in_fr_it = graph.find("crossfeed-dsp:in_FR");
+    if (in_fr_it != graph.end()) {
+        for (const auto& src : in_fr_it->second.inputs) {
+            if (src == "crossfeed:monitor_FR") {
+                in_fr_linked = true;
+            } else {
+                safe_pw_link(src, "crossfeed-dsp:in_FR", true);
+                safe_pw_link(src, "crossfeed:playback_FR");
+            }
+        }
+    }
+    if (!in_fr_linked) {
+        in_fr_linked = safe_pw_link("crossfeed:monitor_FR", "crossfeed-dsp:in_FR");
+    }
+
+    // 3. Auto-reroute any stream playing directly to target physical sink into crossfeed virtual sink
+    bool rogue_target_found = false;
+    if (output_ready && !target_playback_fl_.empty()) {
+        auto tgt_fl_it = graph.find(target_playback_fl_);
+        if (tgt_fl_it != graph.end()) {
+            for (const auto& src : tgt_fl_it->second.inputs) {
+                if (src.find("crossfeed") == std::string::npos && is_valid_port_name(src)) {
+                    const std::string redirected = "crossfeed:playback_FL";
+                    if (safe_pw_link(src, redirected)) {
+                        if (safe_pw_link(src, target_playback_fl_, true)) {
+                            rerouted_links_.push_back({src, target_playback_fl_, redirected});
+                            rogue_target_found = true;
+                        } else {
+                            safe_pw_link(src, redirected, true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (output_ready && !target_playback_fr_.empty()) {
+        auto tgt_fr_it = graph.find(target_playback_fr_);
+        if (tgt_fr_it != graph.end()) {
+            for (const auto& src : tgt_fr_it->second.inputs) {
+                if (src.find("crossfeed") == std::string::npos && is_valid_port_name(src)) {
+                    const std::string redirected = "crossfeed:playback_FR";
+                    if (safe_pw_link(src, redirected)) {
+                        if (safe_pw_link(src, target_playback_fr_, true)) {
+                            rerouted_links_.push_back({src, target_playback_fr_, redirected});
+                            rogue_target_found = true;
+                        } else {
+                            safe_pw_link(src, redirected, true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // If rogue streams bypassed Crossfeed to play directly to physical sink,
+    // also instruct PulseAudio / WirePlumber to migrate sink-inputs bound to physical sinks to crossfeed
+    // so WirePlumber updates its stream restore preference.
+    if (rogue_target_found) {
+        std::string move_cmd =
+            "cf_idx=$(pactl list short sinks 2>/dev/null | grep -w 'crossfeed' | awk '{print $1}'); "
+            "ee_idx=$(pactl list short sinks 2>/dev/null | grep -w 'easyeffects_sink' | awk '{print $1}'); "
+            "pactl list short sink-inputs 2>/dev/null | while read -r id s_idx rest; do "
+            "  [ -n \"$id\" ] && [ -n \"$s_idx\" ] && [ \"$s_idx\" != \"$cf_idx\" ] && [ \"$s_idx\" != \"$ee_idx\" ] && pactl move-sink-input \"$id\" crossfeed 2>/dev/null; "
+            "done";
+        run_sys_cmd(move_cmd);
+    }
+
+    const bool bridge_ready = in_fl_linked && in_fr_linked && output_ready;
+    if (bridge_ready) {
+        if (!routing_active_) activate_routing();
+        else if (!observed_default_sink_.empty() && observed_default_sink_ != "crossfeed")
+            run_sys_cmd("pactl set-default-sink crossfeed 2>/dev/null");
+        output_state_.store(OutputState::Ready);
+    } else if (output_ready) {
+        output_state_.store(OutputState::Reconnecting);
+    }
+    return bridge_ready && !rogue_target_found;
 }
 
 void PipeWireBackend::restore_all_links() {

@@ -13,3 +13,6 @@ scratch/
 # Agent handoff instructions and local walkthrough docs
 AGENTS.md
 docs/
+
+# Experimental Android port (tracked on experimental/android-crossfeed only)
+android/

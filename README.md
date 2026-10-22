@@ -14,7 +14,7 @@
 
 Crossfeed blends a filtered portion of each stereo channel into the opposite ear, reducing extreme left/right separation in headphone listening. One C++17 executable provides the audio engine, GTK3 controls, tray menu, and CLI, with PipeWire, PulseAudio, and ALSA backends.
 
-**Version 2.6.1** fixes GTK switch lever state synchronization and gesture handling on GNOME and KDE desktops, alongside v2.6.0's optional dry/A/B comparisons with shared output trim, saved user presets, and peak meters. The comparison tools are hidden by default; enable **Menu → Show comparison tools** when you need them. See the [release notes](RELEASE_NOTES.md) or [download the release](https://github.com/cecep-91/linux-crossfeed/releases/tag/v2.6.1).
+**Version 2.7.0** introduces real-time lock-free DSP parameter triple-buffering, PipeWire link management loop optimizations, hardened IPC socket security with peer validation, extended characterization test suites, and clean updater shutdown handling. See the [release notes](RELEASE_NOTES.md) or [download the release](https://github.com/cecep-91/linux-crossfeed/releases/tag/v2.7.0).
 
 | Adwaita · light | Breeze · dark |
 | --- | --- |
@@ -30,19 +30,19 @@ Download the package for your system from [GitHub Releases](https://github.com/c
 
 ```sh
 # Debian / Ubuntu
-sudo apt install ./crossfeed_2.6.1-1_amd64.deb
+sudo apt install ./crossfeed_2.7.0-1_amd64.deb
 
 # Fedora
-sudo dnf install ./crossfeed-2.6.1-1.x86_64.rpm
+sudo dnf install ./crossfeed-2.7.0-1.x86_64.rpm
 
 # Void Linux: index the downloaded XBPS package as a local repository
-xbps-rindex -a ./crossfeed-2.6.1_1.x86_64.xbps
+xbps-rindex -a ./crossfeed-2.7.0_1.x86_64.xbps
 sudo xbps-install -R . crossfeed
 ```
 
-Packages install the binary under `/usr/bin`, along with a desktop launcher, icon, and license. On Fedora systems using rpm-ostree, the RPM can be layered with `rpm-ostree install ./crossfeed-2.6.1-1.x86_64.rpm`.
+Packages install the binary under `/usr/bin`, along with a desktop launcher, icon, and license. On Fedora systems using rpm-ostree, the RPM can be layered with `rpm-ostree install ./crossfeed-2.7.0-1.x86_64.rpm`.
 
-For a per-user installation, download and extract `pipewire-crossfeed-2.6.1-linux-x86_64.tar.gz`, then run `./install.sh` inside the extracted directory. It installs to `~/.local/bin` and `~/.local/share`; make sure `~/.local/bin` is on your shell's `PATH`. The user desktop launcher points directly to this installation, even if an older system package is also present.
+For a per-user installation, download and extract `pipewire-crossfeed-2.7.0-linux-x86_64.tar.gz`, then run `./install.sh` inside the extracted directory. It installs to `~/.local/bin` and `~/.local/share`; make sure `~/.local/bin` is on your shell's `PATH`. The user desktop launcher points directly to this installation, even if an older system package is also present.
 
 The binary links to GTK3, Ayatana AppIndicator, and the audio-backend libraries; the tarball is not a static build. Native PipeWire routing also uses `pw-link` and `pactl`, including a reachable PulseAudio-compatible server to create the virtual sink.
 

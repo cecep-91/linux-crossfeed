@@ -26,6 +26,7 @@ inline const CrossfeedPreset g_presets[] = {
     {"bs2b", "Bauer BS2B", "Bauer BS2B — stereophonic-to-binaural high blend simulation", -4.5f, 700.0f, 350.0f, 1200.0f, -2.5f, 2500.0f},
     {"linkwitz", "Linkwitz", "Siegfried Linkwitz — loudspeaker simulation for wide spatial staging", -7.0f, 1200.0f, 220.0f, 1600.0f, -1.8f, 4000.0f},
     {"studio", "Studio 30°", "Natural Studio — simulates near-field stereo monitors at 30° triangle", -8.0f, 850.0f, 250.0f, 1800.0f, -1.5f, 3500.0f},
+    {"jm1", "JM-1 Diffuse", "JM-1 Diffuse — optimized for B&K 5128 diffuse-field / pinna-bypassing IEMs", -10.0f, 750.0f, 260.0f, 1600.0f, -1.2f, 3600.0f},
 };
 
 inline const CrossfeedPreset* find_preset(const std::string& query) {
